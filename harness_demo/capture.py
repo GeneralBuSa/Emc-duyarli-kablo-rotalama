@@ -6,7 +6,7 @@ the page exposes `window.viewer` to select a method, place the camera and set th
 Every number in the captions comes from the metrics embedded in the page. Pillow only places the
 finished screenshots side by side and assembles the GIF frames; no pixel editing is done.
 
-The page loads three.js from a CDN, so capturing needs an internet connection.
+The page embeds three.js, so capturing works offline.
 """
 
 from __future__ import annotations
@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import json
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -25,6 +27,29 @@ PLAN_VIEW = ([3.0, -2.4, -5.6], [3.0, 0.0, 0.9], 50, False)  # looking up into t
 INSIDE_VIEW = ([-1.25, -0.25, 1.05], [3.2, 0.0, 1.25], 60, True)  # standing in the open aft end
 PLAYBACK_VIEW = ([-1.3, -0.2, 0.95], [3.2, 0.0, 1.45], 64, True)  # GIF: inside view, a little more of the arch
 READY_TIMEOUT_S = 90.0
+
+
+# Flags choreographer always passes that the self-contained page does not need: they would let a page
+# read other local files and reach other origins, and allow pop-up windows.
+UNSAFE_CHROME_FLAGS = frozenset({"--disable-web-security", "--allow-file-access-from-files",
+                                 "--disable-popup-blocking"})
+
+
+def browser_options() -> dict[str, Any]:
+    """Headless Chrome with its own sandbox, without extensions and without UNSAFE_CHROME_FLAGS.
+
+    choreographer turns the sandbox and extension blocking off by default and hard-codes the flags, so a
+    subclass of its Chromium launcher filters the command line. Set HARNESS_CHROME_NO_SANDBOX=1 where
+    Chrome's sandbox cannot start (e.g. some Linux containers).
+    """
+    from choreographer.browsers import Chromium  # imported lazily: only needed for image export
+
+    class SafeChromium(Chromium):
+        def get_cli(self) -> list[str]:
+            return [arg for arg in super().get_cli() if arg not in UNSAFE_CHROME_FLAGS]
+
+    return {"browser_cls": SafeChromium, "headless": True, "enable_gpu": True, "enable_extensions": False,
+            "enable_sandbox": os.environ.get("HARNESS_CHROME_NO_SANDBOX") != "1"}
 BACKGROUND = (18, 21, 25)
 
 
@@ -49,9 +74,11 @@ class _Page:
 
     async def setup(self, method: str, view: tuple, labels: str = "context") -> None:
         pos, target, fov, floor = view
-        await self.js(f"window.viewer.select('{method}'); window.viewer.toggle('floor', {str(floor).lower()}); "
-                      f"window.viewer.camera({pos}, {target}, {fov}); window.viewer.labels('{labels}'); "
-                      "window.viewer.actuator(0.35); window.viewer.frame()")
+        values = {"method": method, "floor": bool(floor), "pos": pos, "target": target, "fov": fov, "labels": labels}
+        args = {k: json.dumps(v) for k, v in values.items()}
+        await self.js(f"window.viewer.select({args['method']}); window.viewer.toggle('floor', {args['floor']}); "
+                      f"window.viewer.camera({args['pos']}, {args['target']}, {args['fov']}); "
+                      f"window.viewer.labels({args['labels']}); window.viewer.actuator(0.35); window.viewer.frame()")
 
     async def shot(self) -> Image.Image:
         await self.js("window.viewer.frame()")
@@ -69,7 +96,7 @@ async def _open(browser, html_path: Path) -> _Page:
     deadline = loop.time() + READY_TIMEOUT_S
     while not await page.js("window.__viewerReady === true"):
         if loop.time() > deadline:
-            raise RuntimeError("the 3D viewer did not load (three.js is loaded from a CDN: internet needed)")
+            raise RuntimeError(f"the 3D viewer did not load: {await page.js('window.__viewerErrors')}")
         await asyncio.sleep(0.25)
     return page
 
@@ -97,7 +124,7 @@ async def _capture(html_path: Path, out_dir: Path, methods: Sequence[str], compa
     from choreographer import Browser  # imported lazily: only needed for image export
 
     written: list[Path] = []
-    async with Browser(headless=True, enable_gpu=True) as browser:
+    async with Browser(**browser_options()) as browser:
         page = await _open(browser, html_path)
 
         # One plan-view image per method (README "all methods" grid).

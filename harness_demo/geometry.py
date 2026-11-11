@@ -82,6 +82,18 @@ class BoxVolume:
         p = np.atleast_2d(points)
         return np.all((p > np.asarray(self.lo)) & (p < np.asarray(self.hi)), axis=1)
 
+    def segments_intersect(self, p: np.ndarray, q: np.ndarray) -> np.ndarray:
+        """For E segments (p[i], q[i]): True where the segment passes through the open box (slab method)."""
+        lo, hi = np.asarray(self.lo), np.asarray(self.hi)
+        d = q - p
+        inside_slab = (p > lo) & (p < hi)
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):  # overflow -> +-inf is the slab limit
+            t1, t2 = (lo - p) / d, (hi - p) / d
+        # Parallel to a slab: the whole segment is inside that slab or none of it is.
+        t_enter = np.where(d == 0.0, np.where(inside_slab, -np.inf, np.inf), np.minimum(t1, t2))
+        t_exit = np.where(d == 0.0, np.where(inside_slab, np.inf, -np.inf), np.maximum(t1, t2))
+        return np.maximum(t_enter.max(axis=1), 0.0) < np.minimum(t_exit.min(axis=1), 1.0)
+
     def inflated(self, margin: float) -> BoxVolume:
         """Box grown by `margin` on every side (conservative clearance envelope)."""
         (x0, y0, z0), (x1, y1, z1) = self.lo, self.hi
@@ -107,6 +119,15 @@ class SphereVolume:
         p = np.atleast_2d(points)
         return np.linalg.norm(p - np.asarray(self.center), axis=1) < self.radius
 
+    def segments_intersect(self, p: np.ndarray, q: np.ndarray) -> np.ndarray:
+        """For E segments (p[i], q[i]): True where the segment comes closer to the centre than the radius."""
+        c, d = np.asarray(self.center), q - p
+        dd = np.einsum("ij,ij->i", d, d)
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            t = np.where(dd > 0.0, np.einsum("ij,ij->i", c - p, d) / dd, 0.0)
+        closest = p + np.clip(t, 0.0, 1.0)[:, None] * d
+        return np.linalg.norm(closest - c, axis=1) < self.radius
+
     def inflated(self, margin: float) -> SphereVolume:
         """Sphere grown by `margin` (exact clearance envelope)."""
         return replace(self, radius=self.radius + margin)
@@ -119,19 +140,6 @@ class SphereVolume:
 
 
 ForbiddenVolume = BoxVolume | SphereVolume
-
-
-def default_forbidden_volumes(radius: float = 2.0) -> list[ForbiddenVolume]:
-    """Three representative keep-out volumes placed across typical cable paths."""
-    sphere_c = surface_point(3.0, 50.0, radius)
-    return [
-        # Fuel line running along the crown of the section.
-        BoxVolume("Yakıt hattı", lo=(1.8, -0.45, 1.6), hi=(4.2, 0.45, 2.3), prop="pipe"),
-        # Swept envelope of a moving-surface actuator.
-        SphereVolume("Hareketli yüzey zarfı", center=tuple(sphere_c), radius=0.5, prop="actuator"),
-        # Maintenance access panel (no cables may cross it).
-        BoxVolume("Bakım kapağı", lo=(4.2, -1.65, 1.0), hi=(5.0, -1.10, 1.8), prop="panel"),
-    ]
 
 
 def mark_forbidden_vertices(vertices: np.ndarray, volumes: list[ForbiddenVolume]) -> np.ndarray:

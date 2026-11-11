@@ -3,12 +3,24 @@ name = "emc-harness-routing-demo"
 version = "1.0.0"
 description = "EMC-aware wire harness routing on a 3D fuselage mesh (demo)"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
 # NaN/inf steps must never pass silently.
 filterwarnings = ["error::RuntimeWarning"]
+
+# pytest --cov=harness_demo --cov=main  (CI); capture.py and visualize.py need Chrome / kaleido.
+[tool.coverage.run]
+branch = false
+omit = ["tests/*"]
+
+[tool.coverage.report]
+fail_under = 85
+skip_covered = true
+show_missing = true
 
 [tool.ruff]
 line-length = 120

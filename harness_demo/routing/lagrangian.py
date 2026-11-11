@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 
 import numpy as np
 
@@ -12,35 +13,39 @@ from .core import NoPathError, RoutingResult, shortest_path
 
 
 def _repair_feasible(
-    graph: RoutingGraph, cables: list[Cable], cost: np.ndarray, capacity: int
+    graph: RoutingGraph, cables: list[Cable], cost: np.ndarray, capacity: float, loads: list[float]
 ) -> dict[str, list[int]] | None:
-    """Primal heuristic: route sequentially on `cost`, closing edges that reach capacity."""
-    load = np.zeros(graph.n_edges, dtype=int)
+    """Primal heuristic: route sequentially on `cost`, closing edges this cable would overload."""
+    load = np.zeros(graph.n_edges)
     routes: dict[str, list[int]] = {}
-    for cable in cables:
-        c = np.where(load >= capacity, np.inf, cost)
+    for cable, lk in zip(cables, loads):
+        c = np.where(load + lk > capacity * (1.0 + 1e-9), np.inf, cost)
         try:
             path = shortest_path(graph.csr(c), cable.start, cable.end)
         except NoPathError:
             return None
         routes[cable.name] = path
-        load[graph.path_edge_ids(path)] += 1
+        load[np.unique(graph.path_edge_ids(path))] += lk
     return routes
 
 
 def route_lagrangian(
     graph: RoutingGraph,
     cables: list[Cable],
-    capacity: int = 3,
+    capacity: float = 3,
     iterations: int = 60,
     step_scale: float = 1.0,
     patience: int = 5,
     target_gap: float = 0.05,
+    load_fn: Callable[[str], float] | None = None,
+    capacity_label: str | None = None,
 ) -> RoutingResult:
-    """Lagrangian relaxation of  min sum_k len(P_k)  s.t.  load_e <= K  for every edge.
+    """Lagrangian relaxation of  min sum_k len(P_k)  s.t.  sum_k l_k u_k(e) <= K  for every edge.
 
-    Relaxing the capacity constraint with multipliers lambda_e >= 0 gives
-        L(lambda) = sum_k SP_k(w + lambda) - K * sum_e lambda_e ,
+    l_k is the load of cable k: 1 (cable count, K cables per edge) or with `load_fn` its
+    cross-section (area mode, K = bundle area). Relaxing the capacity constraint with multipliers
+    lambda_e >= 0 gives
+        L(lambda) = sum_k SP_k(w + l_k lambda) - K * sum_e lambda_e ,
     a lower bound on the optimum that decomposes into one shortest-path problem per
     cable. lambda is updated by projected subgradient with a Polyak step; an upper
     bound comes from a capacity-respecting repair heuristic guided by w + lambda.
@@ -48,6 +53,7 @@ def route_lagrangian(
     raised by `target_gap` (so the step stays finite).
     """
     t0 = time.perf_counter()
+    loads = [1.0 if load_fn is None else float(load_fn(c.emc_class)) for c in cables]
     w = graph.lengths
     lam = np.zeros(graph.n_edges)
     best_lb, best_ub = -np.inf, np.inf
@@ -58,13 +64,14 @@ def route_lagrangian(
     for it in range(iterations):
         cost = w + lam
         adj = graph.csr(cost)
-        load = np.zeros(graph.n_edges, dtype=int)
+        load = np.zeros(graph.n_edges)
         sp_total = 0.0
-        for cable in cables:
-            path = shortest_path(adj, cable.start, cable.end)
+        for cable, lk in zip(cables, loads):
+            ck = cost if lk == 1.0 else w + lk * lam
+            path = shortest_path(adj if lk == 1.0 else graph.csr(ck), cable.start, cable.end)
             eids = graph.path_edge_ids(path)
-            sp_total += float(cost[eids].sum())
-            load[eids] += 1
+            sp_total += float(ck[eids].sum())
+            load[eids] += lk
         dual = sp_total - capacity * float(lam.sum())
 
         if dual > best_lb + 1e-9:
@@ -74,7 +81,7 @@ def route_lagrangian(
             if stall >= patience:
                 theta, stall = theta / 2.0, 0
 
-        routes = _repair_feasible(graph, cables, cost, capacity)
+        routes = _repair_feasible(graph, cables, cost, capacity, loads)
         if routes is not None:
             total = sum(graph.path_length(p) for p in routes.values())
             if total < best_ub:
@@ -84,7 +91,7 @@ def route_lagrangian(
             {"iteration": it, "dual": dual, "lower_bound": best_lb, "upper_bound": best_ub, "theta": theta}
         )
 
-        g = (load - capacity).astype(float)
+        g = load - capacity
         g[(lam <= 0.0) & (g < 0.0)] = 0.0  # projected subgradient
         norm2 = float(g @ g)
         if norm2 == 0.0 or best_ub - best_lb < 1e-6:
@@ -95,6 +102,7 @@ def route_lagrangian(
     if best_routes is None:
         raise NoPathError("Lagrangian heuristic found no capacity-feasible solution")
     return RoutingResult(
-        "lagrangian", f"d) Lagrange gevşetmesi (K={capacity})", best_routes, time.perf_counter() - t0, history,
+        "lagrangian", f"d) Lagrange gevşetmesi (K={capacity_label or f'{capacity:g}'})", best_routes,
+        time.perf_counter() - t0, history,
         order=[c.name for c in cables],
     )

@@ -26,6 +26,7 @@ SHORT_LABELS: dict[str, str] = {
     "emc_aware": "c) EMC duyarlı",
     "lagrangian": "d) Lagrange",
     "integrated": "e) Bütünleşik",
+    "branched": "f) Dallı demet",
 }
 
 

@@ -31,9 +31,13 @@ class RoutingResult:
     order: list[str] = field(default_factory=list)  # order in which cables were (last) routed
 
 
-def shortest_path(adj: csr_matrix, source: int, target: int) -> list[int]:
-    """Dijkstra shortest node path from source to target on a CSR adjacency."""
-    dist, pred = dijkstra(adj, directed=True, indices=source, return_predecessors=True)
+def shortest_path(adj: csr_matrix, source: int, target: int, limit: float = np.inf) -> list[int]:
+    """Dijkstra shortest node path from source to target on a CSR adjacency.
+
+    Infinite weights act as missing arcs. With a finite `limit` (an upper bound on the optimal
+    distance) nodes further away are not explored; the path found is the same.
+    """
+    dist, pred = dijkstra(adj, directed=True, indices=source, return_predecessors=True, limit=limit)
     if not np.isfinite(dist[target]):
         raise NoPathError(f"no path {source} -> {target}")
     path = [target]

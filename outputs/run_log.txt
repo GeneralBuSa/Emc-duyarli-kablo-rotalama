@@ -1,27 +1,51 @@
-Mesh: 3904 köşe, 7560 üçgen | Çizge: 3475 düğüm, 10033 ayrıt | 429 düğüm yasak hacimler ve 0.05 m güvenlik payı nedeniyle çıkarıldı | 11 kablo
+Senaryo: Yarım silindir gövde kesiti (harness_demo/examples/fuselage_section.toml)
+Mesh (yarım silindir): 3904 köşe, 7560 üçgen | Çizge: 3475 düğüm, 10033 ayrıt | 429 düğüm yasak hacimler ve 0.05 m güvenlik payı nedeniyle çıkarıldı | 11 kablo
 Dönüş çizgesi: 20066 yönlü ayrıt, 51544 izinli dönüş (bükülme yarıçapı >= 0.1 m)
 
-Yöntem                                   | Toplam uzunluk [m] | Benzersiz uzunluk [m] | Demetlenme oranı | EMC ihlali [nokta] | Bükülme ihlali | Yasak hacim ihlali | Boşluk payı ihlali [nokta] | Kapasite ihlali [ayrıt] | Süre [s]
------------------------------------------+--------------------+-----------------------+------------------+--------------------+----------------+--------------------+----------------------------+-------------------------+---------
-a) Baseline (bağımsız Dijkstra)          |              61.66 |                 51.65 |            0.162 |                980 |              0 |                  0 |                          0 |                      20 |     0.01
-b) Demetleme                             |              71.84 |                 17.80 |            0.752 |               5660 |             15 |                  0 |                          0 |                     116 |     0.01
-c) EMC duyarlı demetleme                 |              66.18 |                 35.22 |            0.468 |                  0 |              8 |                  0 |                          0 |                      35 |     0.05
-d) Lagrange gevşetmesi (K=2)             |              61.76 |                 53.80 |            0.129 |                887 |              0 |                  0 |                          0 |                       0 |     1.08
-e) Bütünleşik (EMC + kapasite + bükülme) |              66.05 |                 40.80 |            0.382 |                  0 |              0 |                  0 |                          0 |                       0 |     0.09
+Yöntem                                   | Toplam uzunluk [m] | Benzersiz uzunluk [m] | Demetlenme oranı | Kablo kütlesi [kg] | EMC ihlali [nokta] | Bükülme ihlali | Yasak hacim ihlali | Boşluk payı ihlali [nokta] | Kapasite ihlali [ayrıt] | Süre [s]
+-----------------------------------------+--------------------+-----------------------+------------------+--------------------+--------------------+----------------+--------------------+----------------------------+-------------------------+---------
+a) Baseline (bağımsız Dijkstra)          |              61.66 |                 51.65 |            0.162 |              10.84 |                987 |              0 |                  0 |                          0 |                      20 |     0.01
+b) Demetleme                             |              71.84 |                 17.80 |            0.752 |              12.37 |               5661 |             15 |                  0 |                          0 |                     116 |     0.03
+c) EMC duyarlı demetleme                 |              66.18 |                 35.22 |            0.468 |              11.39 |                  0 |              8 |                  0 |                          0 |                      35 |     0.08
+d) Lagrange gevşetmesi (K=2)             |              61.76 |                 53.80 |            0.129 |              10.85 |                895 |              0 |                  0 |                          0 |                       0 |     2.44
+e) Bütünleşik (EMC + kapasite + bükülme) |              66.05 |                 40.80 |            0.382 |              11.32 |                  0 |              0 |                  0 |                          0 |                       0 |     0.13
+f) Dallı demet (Steiner ağacı)           |              66.50 |                 40.47 |            0.391 |              11.48 |                  0 |              0 |                  0 |                          0 |                       0 |     0.56
 
 Lagrange: 60 iterasyon, alt sınır 61.7624 m, üst sınır 61.7639 m, fark 0.0014 m (%0.002)
+e) için uzunluk alt sınırı 61.76 m (Lagrange alt sınırı; bükülme sınırı 61.66 m, Lagrange 61.76 m): e) toplam uzunluğu 66.05 m, en kısa uygun çözüme en çok %6.5 uzak.
 Güvenlik payı olmadan kurulan çizgede baseline: 69 boşluk payı ihlali noktası.
-Kablo listesi (e yöntemi): 11/11 kablo tüm paylarla OK, en küçük EMC payı +3.9 cm -> wirelist.csv, routes.json
+Kablo listesi (e yöntemi): 11/11 kablo tüm paylarla OK, en küçük EMC payı +3.9 cm -> wirelist.csv, routes.json, harness_developed.dxf
 
-Sağlamlık testi (20 deneme / deney, sıralı, 10.2 s):
+Sağlamlık testi (20 deneme / deney, sıralı, 51.0 s):
 | Deney | Yöntem | EMC ihlali 0 olan | EMC ort. / en çok [nokta] | Kapasite ort. / en çok [ayrıt] | Bükülme en çok | Tüm denetimler temiz |
 |:---|:---|---:|---:|---:|---:|---:|
 | Rastgele sıra | c) tek geçiş | 6/20 | 24.1 / 72 | 59.1 / 116 | 13 | 0/20 |
 | Rastgele sıra | c) + söküp yeniden rotalama | 20/20 | 0.0 / 0 | 70.7 / 116 | 18 | 0/20 |
-| Rastgele sıra | e) Bütünleşik | 16/20 | 1.6 / 10 | 0.0 / 0 | 0 | 16/20 |
-| Rastgele sıra + uç nokta sapması | c) tek geçiş | 7/20 | 15.8 / 55 | 57.5 / 108 | 10 | 0/20 |
+| Rastgele sıra | e) Bütünleşik | 20/20 | 0.0 / 0 | 0.0 / 0 | 0 | 20/20 |
+| Rastgele sıra | f) Dallı demet | 20/20 | 0.0 / 0 | 0.0 / 0 | 0 | 20/20 |
+| Rastgele sıra + uç nokta sapması | c) tek geçiş | 7/20 | 16.0 / 56 | 57.5 / 108 | 10 | 0/20 |
 | Rastgele sıra + uç nokta sapması | c) + söküp yeniden rotalama | 20/20 | 0.0 / 0 | 52.4 / 110 | 16 | 0/20 |
 | Rastgele sıra + uç nokta sapması | e) Bütünleşik | 20/20 | 0.0 / 0 | 0.0 / 0 | 0 | 20/20 |
-3B görseller etkileşimli sayfadan yakalandı (8 dosya, 26.5 s).
+| Rastgele sıra + uç nokta sapması | f) Dallı demet | 20/20 | 0.0 / 0 | 0.0 / 0 | 0 | 20/20 |
 
-Çıktılar: outputs/, docs/  (toplam süre 41.4 s)
+Mesh yakınsama çalışması (7.0 s):
+| Mesh | Ayrıt aralığı [m] | Düğüm | a) uzunluk [m] | a) EMC [nokta] | e) uzunluk [m] | e) / bükülme alt sınırı | e) EMC / kapasite / bükülme / yasak / boşluk | e) süre [s] |
+|:---|---:|---:|---:|---:|---:|---:|:---:|---:|
+| 1× | 0.100 | 3475 | 61.66 | 987 | 66.05 | 1.071 | 0 / 0 / 0 / 0 / 0 | 0.11 |
+| 1.5× | 0.067 | 7694 | 61.22 | 734 | 65.80 | 1.074 | 0 / 0 / 0 / 0 / 0 | 0.19 |
+| 2× | 0.050 | 13622 | 61.29 | 742 | 85.89 | 1.370 | 0 / 0 / 0 / 0 / 0 | 4.53 |
+
+# Kesin çözümle karşılaştırma
+
+Örnek: 0.20 m mesh (912 düğüm, 5092 yönlü ayrıt, 26968 izinli dönüş), kablolar S4, D2, K = 2. Amaç: toplam uzunluk; kısıtlar: bükülme (dönüş çizgesi), kapasite, EMC ayrımı. MILP: 53960 ikili değişken, 39872 kısıt, HiGHS (scipy.optimize.milp), süre sınırı 120 s.
+
+| Çözüm | Toplam uzunluk [m] | Denetimler (EMC / kapasite / bükülme / yasak / boşluk) | Süre [s] |
+|:---|---:|:---:|---:|
+| e) Bütünleşik | 12.456 | 0 / 0 / 0 / 0 / 0 | 0.01 |
+| MILP (süre sınırına ulaşıldı) | — | — | 128.4 |
+
+- Kanıtlanmış alt sınır (LP gevşetmesinden; MILP süre içinde çözüm bulamadı): 11.390 m. e), optimuma en çok %8.6 uzaktır.
+
+3B görseller güncel (sayfa değişmedi); yakalama atlandı (--force-images ile zorlanabilir).
+
+Çıktılar: outputs/, docs/  (toplam süre 197.0 s)

@@ -1,11 +1,16 @@
 # Python
 .venv/
+venv/
+env/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
 
 # Tool caches
 .pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
 .ruff_cache/
 .mypy_cache/
 
@@ -19,4 +24,21 @@ ci-docs/
 Thumbs.db
 desktop.ini
 .DS_Store
-.claude/settings.local.json
+.claude/
+
+# npm build folder of the bundled three.js (harness_demo/viewer/vendor)
+node_modules/
+npm-debug.log*
+
+# Fingerprint of the page the README images were captured from (local cache)
+outputs/.capture_fingerprint
+
+# hypothesis example database
+.hypothesis/
+
+# Secrets and local credentials (never part of the project)
+.env
+.env.*
+*.pem
+*.key
+credentials.json

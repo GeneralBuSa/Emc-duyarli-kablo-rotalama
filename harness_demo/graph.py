@@ -2,7 +2,7 @@
 
 Nodes are mesh vertices, edges are mesh edges weighted by Euclidean length.
 Vertices inside forbidden volumes are removed together with their edges; edges
-whose straight segment would clip a volume are removed as well. With a clearance
+whose straight segment would clip a volume (exact segment test) are removed as well. With a clearance
 margin the volumes are first inflated, so routes keep that distance from them.
 """
 
@@ -17,6 +17,10 @@ from scipy.sparse import csr_matrix
 from scipy.spatial import cKDTree
 
 from .geometry import ForbiddenVolume, mark_forbidden_vertices
+
+
+class NoRoutableGraphError(ValueError):
+    """The keep-out volumes (with the clearance) leave no routable edge on the skin."""
 
 
 @dataclass
@@ -61,10 +65,6 @@ class RoutingGraph:
             raise KeyError(f"({int(u[bad])}, {int(v[bad])}) is not an edge of the routing graph")
         return self._edge_order[pos]
 
-    def edge_id(self, u: int, v: int) -> int:
-        """Index of the undirected edge (u, v)."""
-        return int(self.edge_ids(np.array([u]), np.array([v]))[0])
-
     def path_edge_ids(self, path: list[int]) -> np.ndarray:
         """Edge indices traversed by a node path."""
         p = np.asarray(path, dtype=np.int64)
@@ -89,12 +89,11 @@ class RoutingGraph:
         return int(self._allowed_ids[k])
 
 
-def _segment_clips_volume(p: np.ndarray, q: np.ndarray, volumes: list[ForbiddenVolume], n: int = 7) -> np.ndarray:
-    """For E segments (p[i], q[i]) return True where any interior sample is inside a volume."""
-    ts = np.linspace(0.0, 1.0, n)[1:-1]
+def _segment_clips_volume(p: np.ndarray, q: np.ndarray, volumes: list[ForbiddenVolume]) -> np.ndarray:
+    """For E segments (p[i], q[i]) return True where the segment passes through any volume (exact test)."""
     hit = np.zeros(len(p), dtype=bool)
-    for t in ts:
-        hit |= mark_forbidden_vertices(p + t * (q - p), volumes)
+    for vol in volumes:
+        hit |= vol.segments_intersect(p, q)
     return hit
 
 
@@ -119,6 +118,8 @@ def build_routing_graph(
 
     g = nx.Graph()
     g.add_weighted_edges_from((int(u), int(v), float(w)) for (u, v), w in zip(edges, lengths))
+    if g.number_of_edges() == 0:
+        raise NoRoutableGraphError("yasak hacimler ve güvenlik payı gövde yüzeyinde hiç rotalanabilir ayrıt bırakmıyor")
     # Keep only the largest connected component so every terminal pair is routable.
     main = max(nx.connected_components(g), key=len)
     g = g.subgraph(main).copy()

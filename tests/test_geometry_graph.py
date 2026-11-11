@@ -6,14 +6,16 @@ import networkx as nx
 import numpy as np
 import pytest
 
-import main
 from harness_demo.checks import distance_to_volume
 from harness_demo.geometry import BoxVolume, SphereVolume, mark_forbidden_vertices
 from harness_demo.graph import build_routing_graph
+from harness_demo.scenarios import load_scenario
+
+SC = load_scenario()  # the example scenario of the published run
 
 
 def test_mesh_size(mesh):
-    assert len(mesh.vertices) == main.PARAMS.n_axial * main.PARAMS.n_circ == 3904
+    assert len(mesh.vertices) == SC.fuselage.n_axial * SC.fuselage.n_circ == 3904
     assert len(mesh.faces) == 7560
 
 
@@ -30,7 +32,7 @@ def test_inflated_volume_contains_clearance_neighbourhood():
 def test_routable_nodes_respect_clearance(graph, volumes):
     allowed = graph.positions[graph.node_allowed]
     for vol in volumes:
-        assert distance_to_volume(allowed, vol).min() >= main.CLEARANCE_M
+        assert distance_to_volume(allowed, vol).min() >= SC.clearance
 
 
 def test_edges_do_not_enter_volumes(graph, volumes):
@@ -43,8 +45,6 @@ def test_graph_is_connected_and_csr_symmetric(graph):
     assert nx.is_connected(graph.nx_graph)
     adj = graph.csr(graph.lengths)
     assert abs(adj - adj.T).max() == 0
-    u, v = (int(x) for x in graph.edges[0])
-    assert graph.edge_id(u, v) == graph.edge_id(v, u) == 0
 
 
 def test_vectorised_edge_lookup(graph):

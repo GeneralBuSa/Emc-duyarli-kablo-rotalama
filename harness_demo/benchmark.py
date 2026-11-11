@@ -21,10 +21,18 @@ from typing import Any
 
 import numpy as np
 
-from .checks import CheckReport, CheckSettings, run_all_checks
+from .checks import CheckReport, CheckSettings
 from .graph import RoutingGraph
 from .metrics import Row
-from .routing import RoutingResult, TurnGraph, route_baseline, route_bundled, route_emc_aware, route_integrated
+from .routing import (
+    RoutingResult,
+    TurnGraph,
+    route_baseline,
+    route_branched,
+    route_bundled,
+    route_emc_aware,
+    route_integrated,
+)
 from .scenarios import Cable, CableSpec, build_scenario, perturb_specs
 
 FAMILIES: tuple[tuple[str, bool], ...] = (("Rastgele sıra", False), ("Rastgele sıra + uç nokta sapması", True))
@@ -34,7 +42,7 @@ FAMILIES: tuple[tuple[str, bool], ...] = (("Rastgele sıra", False), ("Rastgele 
 class RouterSpec:
     """A routing method by name plus its keyword arguments (picklable, unlike a lambda)."""
 
-    method: str  # "baseline" | "bundled" | "emc_aware" | "integrated"
+    method: str  # "baseline" | "bundled" | "emc_aware" | "integrated" | "branched"
     kwargs: dict[str, Any] = field(default_factory=dict)
 
 
@@ -56,21 +64,22 @@ def route_with(spec: RouterSpec, ctx: BenchmarkContext, cables: list[Cable]) -> 
         return route_bundled(ctx.graph, cables, **spec.kwargs)
     if spec.method == "emc_aware":
         return route_emc_aware(ctx.graph, cables, s.separation_fn, **spec.kwargs)
-    if spec.method == "integrated":
+    if spec.method in ("integrated", "branched"):
         if ctx.turns is None:
-            raise ValueError("the integrated method needs the turn graph in the benchmark context")
-        return route_integrated(ctx.graph, cables, s.separation_fn, ctx.turns, s.capacity,
-                                **spec.kwargs)
+            raise ValueError(f"the {spec.method} method needs the turn graph in the benchmark context")
+        router = route_integrated if spec.method == "integrated" else route_branched
+        # Capacity mode and the bundle bend rule come from the check settings, as in the main run.
+        return router(ctx.graph, cables, s.separation_fn, ctx.turns, s.capacity_limit, load_fn=s.load_fn,
+                      diameter_fn=s.diameter_fn, bundle_bend_factor=s.bundle_bend_factor,
+                      bundle_diameter_factor=s.bundle_diameter_factor, **spec.kwargs)
     raise ValueError(f"unknown routing method {spec.method!r}")
 
 
 def _evaluate(spec: RouterSpec, ctx: BenchmarkContext, cables: list[Cable]) -> CheckReport:
     """Route one trial and measure it with the independent checks."""
-    res, s = route_with(spec, ctx, cables), ctx.settings
-    return run_all_checks(
-        [res.routes[c.name] for c in cables], [c.emc_class for c in cables], ctx.graph.positions,
-        s.volumes, s.separation_fn, s.min_bend_radius, s.capacity, s.clearance,
-    )
+    res = route_with(spec, ctx, cables)
+    return ctx.settings.check([res.routes[c.name] for c in cables], [c.emc_class for c in cables],
+                              ctx.graph.positions)
 
 
 _WORKER_CTX: BenchmarkContext | None = None
@@ -99,10 +108,11 @@ def default_workers() -> int:
 
 
 def _trial_cables(
-    graph: RoutingGraph, specs: list[CableSpec], radius: float, rng: np.random.Generator, perturb: bool
+    graph: RoutingGraph, specs: list[CableSpec], radius: float, rng: np.random.Generator, perturb: bool,
+    length: float = np.inf,
 ) -> list[Cable]:
-    """Cables of one trial: optionally perturbed terminals, always a random routing order."""
-    cables = build_scenario(graph, radius, perturb_specs(specs, rng) if perturb else specs)
+    """Cables of one trial: optionally perturbed terminals (kept on the skin), always a random routing order."""
+    cables = build_scenario(graph, radius, perturb_specs(specs, rng, length=length) if perturb else specs)
     return [cables[i] for i in rng.permutation(len(cables))]
 
 
@@ -131,16 +141,18 @@ def run_robustness(
     n_trials: int,
     seed: int = 7,
     workers: int = 1,
+    length: float = np.inf,
 ) -> list[Row]:
     """Run `n_trials` trials per family and summarise each router's check results.
 
+    `length` is the section length: perturbed terminals stay within x in [0, length].
     With `workers > 1` the (router, trial) jobs run in that many processes; the summary is
     identical for any number of workers.
     """
     trials = {}
     for family, perturb in FAMILIES:
         rng = np.random.default_rng(seed)
-        trials[family] = [_trial_cables(ctx.graph, specs, radius, rng, perturb) for _ in range(n_trials)]
+        trials[family] = [_trial_cables(ctx.graph, specs, radius, rng, perturb, length) for _ in range(n_trials)]
     jobs = [(family, label, spec, cables)
             for family, _ in FAMILIES for label, spec in routers.items() for cables in trials[family]]
 

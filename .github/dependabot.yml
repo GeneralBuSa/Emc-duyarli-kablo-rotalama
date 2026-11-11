@@ -1,0 +1,18 @@
+version: 2
+updates:
+  # SHA-pinned GitHub Actions in .github/workflows.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+  # requirements*.txt; after an update regenerate requirements-ci.lock (see README) and the published outputs.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+  # The bundled three.js build (harness_demo/viewer/vendor); rebuild three.bundle.min.js after an update.
+  - package-ecosystem: npm
+    directory: /harness_demo/viewer/vendor
+    schedule:
+      interval: monthly

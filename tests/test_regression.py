@@ -10,11 +10,12 @@ import pytest
 
 # method: (total length, unique length, bundling ratio, EMC, bend, forbidden, clearance, capacity)
 EXPECTED = {
-    "baseline": (61.66, 51.65, 0.162, 980, 0, 0, 0, 20),
-    "bundled": (71.84, 17.80, 0.752, 5660, 15, 0, 0, 116),
+    "baseline": (61.66, 51.65, 0.162, 987, 0, 0, 0, 20),
+    "bundled": (71.84, 17.80, 0.752, 5661, 15, 0, 0, 116),
     "emc_aware": (66.18, 35.22, 0.468, 0, 8, 0, 0, 35),
-    "lagrangian": (61.76, 53.80, 0.129, 887, 0, 0, 0, 0),
+    "lagrangian": (61.76, 53.80, 0.129, 895, 0, 0, 0, 0),
     "integrated": (66.05, 40.80, 0.382, 0, 0, 0, 0, 0),
+    "branched": (66.50, 40.47, 0.391, 0, 0, 0, 0, 0),
 }
 KEYS = ("total_length_m", "unique_length_m", "bundling_ratio", "emc_points", "bend_points",
         "forbidden_points", "clearance_points", "capacity_edges")

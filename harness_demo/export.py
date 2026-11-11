@@ -3,7 +3,8 @@
 wirelist.csv  One row per cable of the chosen method: wire id, both terminals (equipment, node,
               coordinates), routed length, bundle partners and the cable's own verification
               margins (EMC separation, bend radius, keep-out distance), recomputed from geometry
-              with the independent checks, plus an OK/CHECK status.
+              with the independent checks, plus an OK/CHECK status and the length the cable runs
+              close to (within COUPLING_FACTOR x the separation of) a route of another class.
 routes.json   Every method's routes as 3D polylines through mesh vertices on the skin, with the
               run parameters and the check results. Deterministic (no timings) and compact (one
               array per line), so a re-run with the same inputs reproduces the file byte for byte.
@@ -16,14 +17,22 @@ from __future__ import annotations
 
 import csv
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 from scipy.spatial import cKDTree
 
-from .checks import CheckSettings, circumradii, distance_to_volume, resample_polyline
+from .checks import (
+    COUPLING_FACTOR,
+    CheckSettings,
+    circumradii,
+    distance_to_volume,
+    distances_to_polyline,
+    min_distance_to_polyline,
+    resample_polyline,
+)
 from .graph import RoutingGraph
 from .metrics import Row
 from .routing import RoutingResult
@@ -32,12 +41,15 @@ from .scenarios import Cable
 Record = dict[str, Any]  # one wirelist row
 
 FORMAT = "emc-harness-routes/2"
+__all__ = ["COUPLING_FACTOR", "WIRELIST_COLUMNS", "export_routes_json", "export_wirelist_csv",
+           "generate_wirelist_records"]
 WIRELIST_COLUMNS: tuple[str, ...] = (
     "wire_id", "cable_name", "emc_class",
     "from_location", "from_node", "from_x_m", "from_y_m", "from_z_m",
     "to_location", "to_node", "to_x_m", "to_y_m", "to_z_m",
-    "length_m", "waypoint_count", "bundled_with", "shared_length_m", "sharing_ratio",
-    "min_emc_margin_m", "min_bend_radius_m", "min_keepout_distance_m", "status",
+    "length_m", "mass_kg", "waypoint_count", "bundled_with", "shared_length_m", "sharing_ratio",
+    "min_emc_margin_m", "min_bend_radius_m", "bend_limit_m", "min_keepout_distance_m", "near_parallel_length_m",
+    "status",
 )
 
 
@@ -61,27 +73,45 @@ def _bundle_partners(graph: RoutingGraph, cables: Sequence[Cable], routes: dict[
     return out
 
 
-def _margins(polylines: dict[str, np.ndarray], classes: dict[str, str], settings: CheckSettings):
+def _margins(paths: dict[str, list[int]], positions: np.ndarray, classes: dict[str, str], settings: CheckSettings):
     """Per-cable verification margins recomputed with the independent check primitives.
 
     min_emc_margin_m       min over foreign-class routes of (distance - required separation); < 0 = violation
-    min_bend_radius_m      smallest three-vertex circumradius along the route; < limit = violation
+    min_bend_radius_m      smallest three-vertex circumradius along the route
+    bend_limit_m           largest required bend radius along the route: the minimum bend radius, or with
+                           the bundle bend rule the radius the bundle at that turn needs; a vertex whose
+                           radius is below its own limit is a violation
     min_keepout_distance_m smallest distance to any keep-out volume; < clearance = violation
+    near_parallel_length_m route length closer than COUPLING_FACTOR x separation to a foreign-class route
+                           (informative, not a violation)
+
+    Distances to other routes are exact (point to segment), like the EMC check.
     """
+    names = list(paths)
+    polylines = {n: positions[np.asarray(paths[n])] for n in names}
+    required = settings.required_radii([paths[n] for n in names], [classes[n] for n in names])
+    limits = dict(zip(names, required)) if required is not None else {}
     samples = {n: resample_polyline(p) for n, p in polylines.items()}
     trees = {n: cKDTree(s) for n, s in samples.items()}
     out = {}
     for name, pts in samples.items():
         emc = np.inf
+        mids, seg_len = 0.5 * (pts[1:] + pts[:-1]), np.linalg.norm(np.diff(pts, axis=0), axis=1)
+        coupled = np.zeros(len(mids), dtype=bool)
         for other, tree in trees.items():
             sep = settings.separation_fn(classes[name], classes[other]) if other != name else 0.0
             if sep > 0.0:
-                emc = min(emc, float(tree.query(pts)[0].min()) - sep)
+                emc = min(emc, min_distance_to_polyline(pts, samples[other], tree) - sep)
+                zone = COUPLING_FACTOR * sep
+                coupled |= distances_to_polyline(mids, samples[other], tree, cutoff=zone) < zone
         p = polylines[name]
-        bend = float(circumradii(p[:-2], p[1:-1], p[2:]).min()) if len(p) >= 3 else np.inf
+        radii = circumradii(p[:-2], p[1:-1], p[2:]) if len(p) >= 3 else np.empty(0)
+        limit = limits.get(name, np.full(len(radii), settings.min_bend_radius))
+        bend = float(radii.min()) if len(radii) else np.inf
+        bend_limit = float(limit.max()) if len(limit) else settings.min_bend_radius
         keepout = min((float(distance_to_volume(pts, v).min()) for v in settings.volumes), default=np.inf)
-        ok = emc >= 0.0 and bend >= settings.min_bend_radius and keepout >= settings.clearance
-        out[name] = (emc, bend, keepout, "OK" if ok else "CHECK")
+        ok = emc >= 0.0 and bool(np.all(radii >= limit)) and keepout >= settings.clearance
+        out[name] = (emc, bend, bend_limit, keepout, float(seg_len[coupled].sum()), "OK" if ok else "CHECK")
     return out
 
 
@@ -90,44 +120,60 @@ def generate_wirelist_records(
     cables: Sequence[Cable],
     routes: dict[str, list[int]],
     settings: CheckSettings | None = None,
+    mass_fn: Callable[[str], float] | None = None,
 ) -> list[Record]:
-    """One wirelist record per cable; verification columns are filled when `settings` is given."""
+    """One wirelist record per cable; verification columns are filled when `settings` is given,
+    the mass when `mass_fn` (kg/m by EMC class) is given."""
     pos = graph.positions
     partners = _bundle_partners(graph, cables, routes)
     margins = {}
     if settings is not None:
-        margins = _margins({c.name: pos[routes[c.name]] for c in cables}, {c.name: c.emc_class for c in cables},
+        margins = _margins({c.name: routes[c.name] for c in cables}, pos, {c.name: c.emc_class for c in cables},
                            settings)
     records = []
     for k, c in enumerate(cables, start=1):
         path = routes[c.name]
         length = graph.path_length(path)
         mates, shared = partners[c.name]
-        emc, bend, keepout, status = margins.get(c.name, (None, None, None, ""))
+        emc, bend, bend_limit, keepout, parallel, status = margins.get(c.name, (None, None, None, None, None, ""))
         records.append({
             "wire_id": f"W{k:02d}", "cable_name": c.name, "emc_class": c.emc_class,
             "from_location": c.from_location, "from_node": c.start,
             **dict(zip(("from_x_m", "from_y_m", "from_z_m"), (round(float(v), 4) for v in pos[c.start]))),
             "to_location": c.to_location, "to_node": c.end,
             **dict(zip(("to_x_m", "to_y_m", "to_z_m"), (round(float(v), 4) for v in pos[c.end]))),
-            "length_m": round(length, 4), "waypoint_count": len(path),
+            "length_m": round(length, 4),
+            "mass_kg": None if mass_fn is None else round(length * mass_fn(c.emc_class), 4),
+            "waypoint_count": len(path),
             "bundled_with": mates, "shared_length_m": round(shared, 4),
             "sharing_ratio": round(shared / length, 3) if length > 1e-9 else 0.0,
-            "min_emc_margin_m": _round(emc), "min_bend_radius_m": _round(bend),
-            "min_keepout_distance_m": _round(keepout), "status": status,
+            "min_emc_margin_m": _round(emc), "min_bend_radius_m": _round(bend), "bend_limit_m": _round(bend_limit),
+            "min_keepout_distance_m": _round(keepout), "near_parallel_length_m": _round(parallel, 3),
+            "status": status,
         })
     return records
 
 
+_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_text(value: str) -> str:
+    """A text cell a spreadsheet will not run as a formula (OWASP: prefix such cells with a quote)."""
+    return "'" + value if value.startswith(_FORMULA_START) else value
+
+
 def export_wirelist_csv(records: list[Record], csv_path: Path) -> None:
-    """Write wirelist records as CSV (bundle partners joined with ';', missing values empty)."""
+    """Write wirelist records as CSV (bundle partners joined with ';', missing values empty).
+
+    Text cells (names from the scenario file) that start like a formula get a leading quote.
+    """
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=WIRELIST_COLUMNS, lineterminator="\n")
         writer.writeheader()
         for r in records:
-            writer.writerow({k: (";".join(v) if isinstance(v, list) else "" if v is None else v)
-                             for k, v in r.items()})
+            cells = {k: (";".join(v) if isinstance(v, list) else "" if v is None else v) for k, v in r.items()}
+            writer.writerow({k: _csv_text(v) if isinstance(v, str) else v for k, v in cells.items()})
 
 
 def _compact_json(obj: object, level: int = 0) -> str:

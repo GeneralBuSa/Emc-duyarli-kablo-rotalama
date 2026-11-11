@@ -12,55 +12,61 @@ sys.path.insert(0, str(ROOT))
 
 import main  # noqa: E402  (parameters of the published run)
 from harness_demo.checks import run_all_checks  # noqa: E402
-from harness_demo.geometry import build_fuselage, default_forbidden_volumes  # noqa: E402
+from harness_demo.geometry import build_fuselage  # noqa: E402
 from harness_demo.graph import build_routing_graph  # noqa: E402
 from harness_demo.metrics import compute_metrics  # noqa: E402
 from harness_demo.routing import (  # noqa: E402
     build_turn_graph,
     route_baseline,
+    route_branched,
     route_bundled,
     route_emc_aware,
     route_integrated,
     route_lagrangian,
 )
-from harness_demo.scenarios import build_scenario, separation  # noqa: E402
+from harness_demo.scenarios import build_scenario, load_scenario  # noqa: E402
+
+SC = load_scenario()  # the example scenario of the published run
+separation = SC.separation
 
 
 @pytest.fixture(scope="session")
 def mesh():
-    return build_fuselage(main.PARAMS)
+    return build_fuselage(SC.fuselage)
 
 
 @pytest.fixture(scope="session")
 def volumes():
-    return default_forbidden_volumes(main.PARAMS.radius)
+    return SC.volumes
 
 
 @pytest.fixture(scope="session")
 def graph(mesh, volumes):
-    return build_routing_graph(mesh, volumes, clearance=main.CLEARANCE_M)
+    return build_routing_graph(mesh, volumes, clearance=SC.clearance)
 
 
 @pytest.fixture(scope="session")
 def cables(graph):
-    return build_scenario(graph, main.PARAMS.radius)
+    return build_scenario(graph, SC.fuselage.radius, SC.cables)
 
 
 @pytest.fixture(scope="session")
 def turns(graph):
-    return build_turn_graph(graph, main.MIN_BEND_RADIUS_M)
+    return build_turn_graph(graph, SC.min_bend_radius)
 
 
 @pytest.fixture(scope="session")
 def results(graph, cables, turns):
-    """The five methods exactly as main.py runs them, keyed by method name."""
+    """The six methods exactly as main.py runs them, keyed by method name."""
     out = [
         route_baseline(graph, cables),
-        route_bundled(graph, cables, reuse_factor=main.REUSE_FACTOR),
-        route_emc_aware(graph, cables, separation, reuse_factor=main.REUSE_FACTOR, emc_penalty=main.EMC_PENALTY),
-        route_lagrangian(graph, cables, capacity=main.CAPACITY_K, iterations=main.LAGRANGE_ITERATIONS),
-        route_integrated(graph, cables, separation, turns, main.CAPACITY_K, reuse_factor=main.REUSE_FACTOR,
-                         emc_penalty=main.EMC_PENALTY),
+        route_bundled(graph, cables, reuse_factor=SC.reuse_factor),
+        route_emc_aware(graph, cables, separation, reuse_factor=SC.reuse_factor, emc_penalty=SC.emc_penalty),
+        route_lagrangian(graph, cables, capacity=SC.capacity_k, iterations=main.LAGRANGE_ITERATIONS),
+        route_integrated(graph, cables, separation, turns, SC.capacity_k, reuse_factor=SC.reuse_factor,
+                         emc_penalty=SC.emc_penalty),
+        route_branched(graph, cables, separation, turns, SC.capacity_k, reuse_factor=SC.reuse_factor,
+                       emc_penalty=SC.emc_penalty),
     ]
     return {r.method: r for r in out}
 
@@ -72,7 +78,7 @@ def metrics(results, graph, cables, volumes):
     for name, res in results.items():
         report = run_all_checks(
             [res.routes[c.name] for c in cables], [c.emc_class for c in cables], graph.positions, volumes,
-            separation, main.MIN_BEND_RADIUS_M, main.CAPACITY_K, main.CLEARANCE_M,
+            separation, SC.min_bend_radius, SC.capacity_k, SC.clearance,
         )
         rows[name] = compute_metrics(res, graph, report)
     return rows

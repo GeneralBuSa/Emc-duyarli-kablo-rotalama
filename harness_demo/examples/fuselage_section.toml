@@ -1,0 +1,163 @@
+# Örnek senaryo: yarım silindir gövde kesiti, üç yasak hacim, 11 kablo.
+# Tüm değerler temsilîdir; herhangi bir standarttan ya da gerçek bir uçaktan alınmamıştır.
+#
+# Kendi senaryonuz için bu dosyayı kopyalayıp düzenleyin ve şöyle çalıştırın:
+#   python main.py --scenario senaryom.toml
+#
+# Gerçek bir yüzey için [fuselage] tablosunda radius_m/length_m yerine bir mesh dosyası verilebilir
+# (senaryo dosyasının klasöründe; .stl, .obj ya da .ply), o zaman kablo uçları 3B nokta olarak yazılır:
+#   [fuselage]
+#   mesh_file = "govde.stl"
+#   scale = 0.001        # dosya mm ise
+#   max_edge_m = 0.15    # isteğe bağlı: üçgenleri bu kenar uzunluğuna kadar böl (bükülme yarıçapından küçük olmasın)
+#   ...
+#   from = { point = [0.3, 1.34, 1.49], at = "Arka raf (sağ)" }
+#
+# Koordinatlar: x gövde ekseni boyunca [m], z yukarı; kaplama y² + z² = R², z >= 0.
+# Kablo uçları kaplama üzerinde (x [m], theta [°]) ile verilir: theta = 0 sağ alt kenar, 90 tepe, 180 sol alt kenar.
+
+[scenario]
+name = "Yarım silindir gövde kesiti"
+description = "11 kablo, üç yasak hacim; demetlenme, EMC ayrımı, kapasite ve bükülme aynı anda devrede."
+
+[fuselage]
+radius_m = 2.0
+length_m = 6.0
+n_axial = 61     # eksen boyunca köşe sayısı (~0,10 m aralık)
+n_circ = 64      # yay boyunca köşe sayısı (~0,10 m aralık)
+jitter = 0.15    # iç köşelere uygulanan rastgele kayma, ızgara aralığının oranı
+seed = 42
+
+# Kurallar. Komut satırı seçenekleri (--capacity, --clearance, --bundle-bend-factor) bu değerlerin üzerine yazar.
+[rules]
+min_bend_radius_m = 0.10
+capacity_k = 2              # ayrıt başına en çok kablo (bilerek dar: kısıt devrede kalsın)
+clearance_m = 0.05          # rota ile yasak hacim arasındaki en küçük mesafe
+# Demet bükülme kuralı: dönüş yarıçapı >= bundle_bend_factor × demet çapı (0 = kapalı).
+# Demet çapı = bundle_diameter_factor × √(Σ kablo çapı²). Örn. bundle_bend_factor = 6 ile e) ve f) bu kurala uyar.
+bundle_bend_factor = 0
+bundle_diameter_factor = 1.25
+
+# Sezgisel yöntemlerin maliyet ağırlıkları (--reuse-factor, --emc-penalty, --coupling-penalty ile değiştirilebilir).
+[routing]
+reuse_factor = 0.4          # başka kablonun kullandığı ayrıtın maliyet çarpanı (demetlemeyi ödüllendirir)
+emc_penalty = 20.0          # başka sınıfın rotasına (ayrım mesafesi + 3 cm) yakın ayrıtların ek maliyeti × uzunluk
+coupling_penalty = 0.0      # e) ve f): ayrım mesafesinin 2 katından yakın ayrıtların ek maliyeti (yan yana koşu);
+                            # 0 = kapalı. 1 bu senaryoda e)'yi iyileştirir, başka durumlarda uzatabilir (README)
+
+# EMC sınıfları: power, signal, data. Çap kesit alanı kapasite modunda ve demet bükülme kuralında,
+# kütle (isteğe bağlı; ya her sınıfta ya hiçbirinde) kablo kütlesi metriğinde kullanılır. Değerler temsilîdir.
+[classes.power]
+diameter_m = 0.015
+mass_kg_per_m = 0.30
+
+[classes.signal]
+diameter_m = 0.011
+mass_kg_per_m = 0.12
+
+[classes.data]
+diameter_m = 0.010
+mass_kg_per_m = 0.08
+
+# Farklı sınıflardaki iki rota arasında gereken en küçük mesafe [m]; her sınıf çifti için bir değer.
+[separation_m]
+power-signal = 0.15
+power-data = 0.20
+signal-data = 0.10
+
+# Yasak hacimler: kutu (lo/hi köşeleri) ya da küre (merkez ve yarıçap). Kürenin merkezi kaplama üzerinde
+# (x, theta) ile de verilebilir. `prop` yalnızca 3B görünümdeki temsilî modeli seçer (pipe, actuator, panel).
+[[keep_out]]
+name = "Yakıt hattı"
+shape = "box"
+lo = [1.8, -0.45, 1.6]
+hi = [4.2, 0.45, 2.3]
+prop = "pipe"
+
+[[keep_out]]
+name = "Hareketli yüzey zarfı"
+shape = "sphere"
+center_on_surface = { x = 3.0, theta = 50.0 }
+radius_m = 0.5
+prop = "actuator"
+
+[[keep_out]]
+name = "Bakım kapağı"
+shape = "box"
+lo = [4.2, -1.65, 1.0]
+hi = [5.0, -1.10, 1.8]
+prop = "panel"
+
+# Kablolar listedeki sırayla rotalanır (--order ile değiştirilebilir). `at` ucun bağlı olduğu ekipmandır.
+# Sağ taraf: arka raf -> ön panel; hareketli yüzey zarfı yolu keser.
+[[cables]]
+name = "P1"
+class = "power"
+from = { x = 0.3, theta = 48.0, at = "Arka raf (sağ)" }
+to = { x = 5.7, theta = 50.0, at = "Ön panel (sağ)" }
+
+[[cables]]
+name = "P2"
+class = "power"
+from = { x = 0.4, theta = 51.0, at = "Arka raf (sağ)" }
+to = { x = 5.6, theta = 53.0, at = "Ön panel (sağ)" }
+
+[[cables]]
+name = "S1"
+class = "signal"
+from = { x = 0.3, theta = 59.0, at = "Arka raf (sağ)" }
+to = { x = 5.7, theta = 61.0, at = "Ön panel (sağ)" }
+
+[[cables]]
+name = "S2"
+class = "signal"
+from = { x = 0.4, theta = 62.0, at = "Arka raf (sağ)" }
+to = { x = 5.6, theta = 64.0, at = "Ön panel (sağ)" }
+
+[[cables]]
+name = "D1"
+class = "data"
+from = { x = 0.3, theta = 69.0, at = "Arka raf (sağ)" }
+to = { x = 5.7, theta = 71.0, at = "Ön panel (sağ)" }
+
+# Sol taraf: arka raf -> ön panel; bakım kapağı yolu keser.
+[[cables]]
+name = "D2"
+class = "data"
+from = { x = 0.3, theta = 112.0, at = "Arka raf (sol)" }
+to = { x = 5.7, theta = 114.0, at = "Ön panel (sol)" }
+
+[[cables]]
+name = "S3"
+class = "signal"
+from = { x = 0.3, theta = 121.0, at = "Arka raf (sol)" }
+to = { x = 5.7, theta = 123.0, at = "Ön panel (sol)" }
+
+[[cables]]
+name = "P3"
+class = "power"
+from = { x = 0.3, theta = 132.0, at = "Arka raf (sol)" }
+to = { x = 5.7, theta = 134.0, at = "Ön panel (sol)" }
+
+[[cables]]
+name = "P4"
+class = "power"
+from = { x = 0.4, theta = 135.0, at = "Arka raf (sol)" }
+to = { x = 5.6, theta = 137.0, at = "Ön panel (sol)" }
+
+# İki taraf arasındaki bağlantılar: diğer demetleri kesmek zorundadır.
+[[cables]]
+name = "D3"
+class = "data"
+from = { x = 0.4, theta = 72.0, at = "Arka raf (sağ)" }
+to = { x = 5.6, theta = 110.0, at = "Ön panel (sol)" }
+
+[[cables]]
+name = "S4"
+class = "signal"
+from = { x = 0.8, theta = 125.0, at = "Arka raf (sol)" }
+to = { x = 5.2, theta = 58.0, at = "Ön panel (sağ)" }
+
+# İsteğe bağlı: --exact karşılaştırmasında kullanılacak kablolar (verilmezse ilk iki kablo).
+[study]
+exact_cables = ["S4", "D2"]

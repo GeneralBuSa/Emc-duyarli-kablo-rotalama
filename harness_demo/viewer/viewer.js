@@ -2,21 +2,41 @@
 // harness_demo/presentation.py; the data (`#data` JSON) is embedded by the same step.
 // Everything added for realism here (structure, clamps, smoothing, lighting) is visual only.
 
-import * as THREE from "three";
-import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
-import { CSS2DRenderer, CSS2DObject } from "three/addons/renderers/CSS2DRenderer.js";
+// three.js is embedded in the page as a bundle (harness_demo/viewer/vendor), so no CDN is needed.
+const { THREE, OrbitControls, RoomEnvironment, CSS2DRenderer, CSS2DObject } = window.__three;
 
 const D = JSON.parse(document.getElementById("data").textContent);
 const CAPTURE = new URLSearchParams(location.search).has("capture");   // README image rendering
-if (CAPTURE) document.body.classList.add("capture");
-const R = D.radius, LEN = D.length, V = D.mesh.v;
+if (CAPTURE) {   // README images always use the dark theme, whatever the capturing browser prefers
+  document.body.classList.add("capture");
+  document.documentElement.dataset.theme = "dark";
+}
+// Large numeric arrays are embedded as base64 little-endian typed arrays (see presentation.py).
+function decode(spec) {
+  const bin = atob(spec.b64), bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const T = { f32: Float32Array, u16: Uint16Array, u32: Uint32Array, i16: Int16Array, i32: Int32Array }[spec.dtype];
+  return new T(bytes.buffer);
+}
+const R = D.radius, LEN = D.length, V = decode(D.mesh.v);
 const LIFT = 0.105;          // visual standoff of the bundle centreline off the skin [m]
 const SLOT = 0.017;          // spacing of cables inside a bundle [m]
 const CABLE_R = { power: 0.0075, signal: 0.0055, data: 0.005 };
 const CLAMP_STEP = 0.32;     // visual clamp spacing along bundles [m]
 const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
-const CLASS_TR = { power: "güç", signal: "sinyal", data: "veri" };
+// Interface texts (Turkish / English) come from viewer/i18n.json through viewer/i18n.js.
+const I18N = window.__i18n, t = I18N.t;
+const clsName = k => (I18N.has("class." + k) ? t("class." + k) : k);
+// Equipment and keep-out names are scenario data (Turkish in the example); the dictionary translates the known
+// ones ("name.<text>") and any other name is shown as written in the scenario file.
+const placeName = n => (I18N.has("name." + n) ? t("name." + n) : n);
+// Method labels come from the pipeline in Turkish; other languages translate them by method key.
+function methodLabel(m) {
+  if (I18N.lang === "tr" || !I18N.has("method." + m.key)) return m.label;
+  return t("method." + m.key, { k: (m.label.match(/\s*\(K=[^)]*\)/) || [""])[0] });
+}
+// Everything interpolated into HTML goes through esc(): data could one day come from a user file.
+const esc = v => String(v).replace(/[&<>"']/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]);
 
 const vtx = i => new THREE.Vector3(V[3 * i], V[3 * i + 1], V[3 * i + 2]);
 const inward = p => new THREE.Vector3(0, -p.y, -p.z).normalize();   // towards the fuselage axis
@@ -48,7 +68,7 @@ controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.minDistance = 0.3;
 controls.maxDistance = 25;
-controls.autoRotateSpeed = 0.8;
+controls.autoRotateSpeed = 0.7;
 
 const CENTER = new THREE.Vector3(LEN / 2, 0, 1.1);
 const hemi = new THREE.HemisphereLight(0xe9eef4, 0x4a453f, 0.75);
@@ -120,6 +140,10 @@ function surfaceBasis(theta) {
 }
 const labels = new THREE.Group();
 scene.add(labels);
+const labelEls = [];   // decluttering order: keep-out volumes first, then equipment, then cable names
+const koLabels = [];   // keep-out labels ("Yasak: …"), re-texted when the language changes
+const eqLabels = [];   // equipment labels, re-texted when the language changes
+const LABEL_PRIORITY = { ko: 0, eq: 1, "": 2 };
 function addLabel(text, pos, cls = "", color = null) {
   const el = document.createElement("div");
   el.className = "lbl " + cls;
@@ -128,13 +152,14 @@ function addLabel(text, pos, cls = "", color = null) {
   const o = new CSS2DObject(el);
   o.position.copy(pos);
   labels.add(o);
+  labelEls.push({ el, prio: LABEL_PRIORITY[cls] ?? 3 });
   return o;
 }
 
 // ---------------------------------------------------------------- fuselage skin
 const skinGeo = new THREE.BufferGeometry();
 skinGeo.setAttribute("position", new THREE.Float32BufferAttribute(V, 3));
-skinGeo.setIndex(D.mesh.f);
+skinGeo.setIndex(new THREE.BufferAttribute(decode(D.mesh.f), 1));
 skinGeo.computeVertexNormals();
 let outwardScore = 0;
 const nrm = skinGeo.attributes.normal;
@@ -229,7 +254,8 @@ for (const vol of D.volumes) {
     }
     if (vol.prop === "actuator") buildActuator(center, vol.radius);
   }
-  addLabel("Yasak: " + vol.name, center.clone().add(inward(center).multiplyScalar(0.12)), "ko");
+  koLabels.push({ el: addLabel(t("keepout.label", { name: placeName(vol.name) }),
+                               center.clone().add(inward(center).multiplyScalar(0.12)), "ko").element, name: vol.name });
 }
 scene.add(keepout, props);
 
@@ -329,11 +355,13 @@ function buildActuator(c, envR) {
 // ---------------------------------------------------------------- equipment racks at the cable terminals
 const equipment = new THREE.Group();
 {
-  const groups = {};   // equipment name (from the scenario) -> terminal positions
+  // equipment name (from the scenario) -> terminal positions; a Map, so names like "constructor" are just names
+  const groups = new Map();
   for (const c of D.cables) for (const [node, name] of [[c.start, c.from], [c.end, c.to]]) {
-    (groups[name] ||= []).push(vtx(node));
+    if (!groups.has(name)) groups.set(name, []);
+    groups.get(name).push(vtx(node));
   }
-  for (const [name, pts] of Object.entries(groups)) {
+  for (const [name, pts] of groups) {
     const ths = pts.map(thetaOf), aft = pts[0].x < LEN / 2;
     const t0 = Math.min(...ths) - 0.07, t1 = Math.max(...ths) + 0.07;
     const xs = pts.map(p => p.x), depth = 0.18;
@@ -343,7 +371,8 @@ const equipment = new THREE.Group();
     const face = new THREE.Mesh(arcSection(R - 0.21, R - 0.014, t0 + 0.012, t1 - 0.012, 0.004, aft ? x0 + depth : x0 - 0.004), M.boxFace);
     equipment.add(face);
     const tm = (t0 + t1) / 2, rm = R - 0.11;
-    addLabel(name, new THREE.Vector3(x0 + depth / 2, rm * Math.cos(tm), rm * Math.sin(tm)).add(new THREE.Vector3(0, 0, 0)), "eq");
+    eqLabels.push({ el: addLabel(placeName(name), new THREE.Vector3(x0 + depth / 2, rm * Math.cos(tm), rm * Math.sin(tm)),
+                                 "eq").element, name });
   }
 }
 scene.add(equipment);
@@ -417,7 +446,7 @@ function buildMethod(m) {
       ends.add(sl);
     }
     group.add(ends);
-    cables.push({ c, mesh, geo, segs, radial, curve, ends, length: m.lengths[c.name], margin: (m.margins || {})[c.name] });
+    cables.push({ c, mesh, geo, segs, radial, curve, ends, length: m.lengths[c.name], margin: m.margins && Object.hasOwn(m.margins, c.name) ? m.margins[c.name] : undefined });
     centres.push(ctr);
   });
   buildClamps(centres, clampsG);
@@ -476,13 +505,10 @@ function buildClamps(centres, parent) {
   shadowed(torus); shadowed(brk);
   parent.add(torus, brk);
 }
-function buildViolations(flat, parent) {
-  const seen = new Set(), pts = [];
-  for (let i = 0; i < flat.length; i += 3) {
-    const key = flat.slice(i, i + 3).map(v => Math.round(v * 200)).join(",");
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const p = new THREE.Vector3(flat[i], flat[i + 1], flat[i + 2]);
+function buildViolations(spec, parent) {
+  const mm = decode(spec), pts = [];   // violation points in millimetres, already de-duplicated
+  for (let i = 0; i < mm.length; i += 3) {
+    const p = new THREE.Vector3(mm[i] / 1000, mm[i + 1] / 1000, mm[i + 2] / 1000);
     pts.push(p.addScaledVector(inward(p), LIFT));
   }
   if (!pts.length) return;
@@ -501,88 +527,194 @@ for (const c of D.cables) {
   labels.remove(o); cableLabels.add(o);
 }
 
-// ---------------------------------------------------------------- UI: tabs, stats, legend, toggles, views
+// ---------------------------------------------------------------- UI: theme, tabs, summary, stats, legend, toggles, views
+labelEls.sort((a, b) => a.prio - b.prio);
+
+// Theme switch: follows the OS setting until it is flipped once; the choice is then remembered.
+const themeBtn = document.getElementById("theme");
+const darkMedia = matchMedia("(prefers-color-scheme: dark)");
+const isDark = () => (document.documentElement.dataset.theme || (darkMedia.matches ? "dark" : "light")) === "dark";
+const syncThemeSwitch = () => themeBtn.setAttribute("aria-checked", String(isDark()));
+themeBtn.addEventListener("click", () => {
+  const t = isDark() ? "light" : "dark";
+  document.documentElement.dataset.theme = t;
+  try { localStorage.setItem("emc-kablo:theme", t); } catch (e) { /* storage blocked: the switch still works for this visit */ }
+  syncThemeSwitch();
+});
+darkMedia.addEventListener("change", syncThemeSwitch);
+syncThemeSwitch();
+
+// Language: TR / EN segmented control; every text the viewer renders is redrawn on change.
+const langEl = document.getElementById("lang");
+const syncLang = () => setRadio(langEl, langEl.querySelector(`[data-lang="${I18N.lang}"]`));
+for (const b of langEl.querySelectorAll("button")) b.addEventListener("click", () => I18N.set(b.dataset.lang));
+radioKeys(langEl);
+syncLang();
+
+// Arrow keys move through a radiogroup of buttons (speed, camera presets) and activate the new one.
+function radioKeys(group) {
+  group.addEventListener("keydown", e => {
+    const items = [...group.querySelectorAll('[role="radio"]')], i = items.indexOf(document.activeElement);
+    const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+    if (i < 0 || !step) return;
+    e.preventDefault();
+    const next = items[(i + step + items.length) % items.length];
+    next.focus();
+    next.click();
+  });
+}
+function setRadio(group, current) {   // aria-checked + roving tabindex, then slide the thumb to it
+  for (const b of group.querySelectorAll('[role="radio"]')) {
+    b.setAttribute("aria-checked", String(b === current));
+    b.tabIndex = b === current ? 0 : -1;
+  }
+  placeThumb(group);
+}
+// The highlighted background of a segmented control is one element that moves under the checked button.
+function placeThumb(group, instant = false) {
+  let thumb = group.querySelector(".seg-thumb");
+  if (!thumb) {
+    thumb = document.createElement("span");
+    thumb.className = "seg-thumb";
+    thumb.setAttribute("aria-hidden", "true");
+    group.prepend(thumb);
+    new ResizeObserver(() => placeThumb(group, true)).observe(group);   // layout changes: follow without sliding
+    instant = true;
+  }
+  const cur = group.querySelector('[aria-checked="true"]');
+  if (!cur) return;
+  if (instant) thumb.style.transition = "none";
+  thumb.style.setProperty("--x", `${cur.offsetLeft}px`);
+  thumb.style.setProperty("--w", `${cur.offsetWidth}px`);
+  if (instant) { void thumb.offsetWidth; thumb.style.transition = ""; }   // apply, then re-enable the animation
+}
+const CHECK_SVG = '<svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
+
+const fmt = (x, d) => x.toLocaleString(I18N.locale(), { minimumFractionDigits: d, maximumFractionDigits: d });
+const CHECKS = [   // [metric key, label key, unit key]
+  ["emc_points", "check.emc", "unit.points"], ["capacity_edges", "check.capacity", "unit.edges"],
+  ["bend_points", "check.bend", "unit.points"], ["forbidden_points", "check.forbidden", "unit.points"],
+  ["clearance_points", "check.clearance", "unit.points"],
+];
+const checkList = m => failedChecks(m).map(([k, l, u]) => `${esc(t(l))} ${fmt(m[k], 0)} ${esc(t(u))}`).join(", ");
+const mark = ok => (ok ? "✓" : "✗");   // status is never shown by colour alone
+const failedChecks = m => CHECKS.filter(([k]) => m[k]);
+
 let active = null;
-const tabsEl = document.getElementById("tabs");
-methods.forEach(v => {
+const tabsEl = document.getElementById("tabs"), panelEl = document.getElementById("panel");
+methods.forEach((v, i) => {
   const b = document.createElement("button");
-  b.type = "button"; b.setAttribute("role", "tab"); b.dataset.key = v.m.key; b.textContent = v.m.label;
-  b.addEventListener("click", () => select(v.m.key, false));
+  b.type = "button"; b.id = "tab-" + v.m.key; b.textContent = methodLabel(v.m);
+  b.setAttribute("role", "tab"); b.setAttribute("aria-controls", "panel"); b.dataset.key = v.m.key;
+  b.addEventListener("click", () => select(v.m.key));
+  b.addEventListener("keydown", e => {   // roving focus: arrows, Home, End (the tab is selected on focus)
+    const n = methods.length;
+    const to = { ArrowRight: (i + 1) % n, ArrowLeft: (i - 1 + n) % n, Home: 0, End: n - 1 }[e.key];
+    if (to === undefined) return;
+    e.preventDefault();
+    select(methods[to].m.key);
+    tabsEl.children[to].focus();
+  });
   tabsEl.appendChild(b);
 });
+
+function renderSummary(m) {
+  const bad = failedChecks(m);
+  const badge = bad.length
+    ? `<span class="badge ng">✗ ${esc(t("summary.bad", { n: bad.length }))}</span>`
+    : `<span class="badge ok">✓ ${esc(t("summary.ok"))}</span>`;
+  document.getElementById("summary").innerHTML = badge +
+    esc(t("summary.line", { len: fmt(m.total_length_m, 2), ratio: fmt(m.bundling_ratio, 3) })) +
+    (bad.length ? ` · ${checkList(m)}` : "");
+}
 function renderStats(m) {
-  const fmt = (x, d) => x.toLocaleString("tr-TR", { minimumFractionDigits: d, maximumFractionDigits: d });
   const items = [
-    ["Toplam uzunluk", fmt(m.total_length_m, 2) + " m", ""],
-    ["Benzersiz uzunluk", fmt(m.unique_length_m, 2) + " m", ""],
-    ["Demetlenme oranı", fmt(m.bundling_ratio, 3), ""],
-    ["EMC ihlali", fmt(m.emc_points, 0) + " nokta", m.emc_points ? "ng" : "ok"],
-    ["Bükülme ihlali", String(m.bend_points), m.bend_points ? "ng" : "ok"],
-    ["Yasak hacim ihlali", String(m.forbidden_points), m.forbidden_points ? "ng" : "ok"],
-    ["Boşluk payı ihlali", String(m.clearance_points), m.clearance_points ? "ng" : "ok"],
-    ["Kapasite ihlali", m.capacity_edges + " ayrıt", m.capacity_edges ? "ng" : "ok"],
+    [t("stats.total"), fmt(m.total_length_m, 2) + " m", ""],
+    [t("stats.unique"), fmt(m.unique_length_m, 2) + " m", ""],
+    [t("stats.bundling"), fmt(m.bundling_ratio, 3), ""],
+    ...CHECKS.map(([k, l, u]) => [t("stats.violation", { check: t(l) }), `${mark(!m[k])} ${fmt(m[k], 0)} ${t(u)}`,
+                                  m[k] ? "ng" : "ok"]),
   ];
   document.getElementById("stats").innerHTML = items
-    .map(([k, v, c]) => `<div class="stat"><div class="k">${k}</div><div class="v ${c}">${v}</div></div>`).join("");
+    .map(([k, v, c]) => `<div class="stat"><div class="k">${esc(k)}</div><div class="v ${c}">${esc(v)}</div></div>`).join("");
 }
-document.getElementById("legend").innerHTML =
-  Object.entries(D.classColors).map(([k, c]) => `<div><span class="sw" style="background:${c}"></span>${k} (${CLASS_TR[k] || k})</div>`).join("") +
-  `<div><span class="sw" style="background:#e34948;opacity:.75"></span>yasak hacim</div>` +
-  `<div><span class="dot" style="background:#ff2a3d"></span>EMC ihlali noktası</div>`;
+const statsBox = document.getElementById("statsbox");
+statsBox.open = matchMedia("(min-width: 721px)").matches;   // on phones the 3D view comes first
 
-const toggles = [
-  ["skin", "Gövde kaplaması", true, v => { skin.visible = v; }],
-  ["structure", "Frame / stringer", true, v => { structure.visible = v; }],
-  ["floor", "Zemin", true, v => { floor.visible = v; }],
-  ["keepout", "Yasak hacimler", true, v => { keepout.visible = v; }],
-  ["equipment", "Ekipman", true, v => { equipment.visible = v; props.visible = v; }],
-  ["clamps", "Kelepçeler", true, v => methods.forEach(x => { x.clampsG.visible = v; })],
-  ["viol", "EMC ihlalleri", true, v => methods.forEach(x => { x.violG.visible = v; })],
-  ["labels", "Etiketler", true, v => { labels.visible = v; }],
-  ["rotate", "Otomatik döndür", false, v => { controls.autoRotate = v; }],
+function renderLegend() {
+  document.getElementById("legend").innerHTML =
+    Object.entries(D.classColors).map(([k, c]) =>
+      `<div><span class="sw" style="background:${esc(c)}"></span>${esc(clsName(k))}</div>`).join("") +
+    `<div><span class="sw" style="background:#e34948;opacity:.75"></span>${esc(t("legend.keepout"))}</div>` +
+    `<div><span class="dot" style="background:#ff2a3d"></span>${esc(t("legend.viol"))}</div>`;
+}
+renderLegend();
+
+const toggles = [   // [key, initially on, apply]; the chip text is t("layer." + key)
+  ["skin", true, v => { skin.visible = v; }],
+  ["structure", true, v => { structure.visible = v; }],
+  ["floor", true, v => { floor.visible = v; }],
+  ["keepout", true, v => { keepout.visible = v; }],
+  ["equipment", true, v => { equipment.visible = v; props.visible = v; }],
+  ["clamps", true, v => methods.forEach(x => { x.clampsG.visible = v; })],
+  ["viol", true, v => methods.forEach(x => { x.violG.visible = v; })],
+  ["labels", true, v => { labels.visible = v; }],
+  // on at start, except for README captures (fixed camera) and when the user asks for reduced motion
+  ["rotate", !CAPTURE && !REDUCED, v => { controls.autoRotate = v; }],
 ];
-const chipEls = {};
+const chipEls = {}, chipText = {};
 const chips = document.getElementById("chips");
-for (const [key, text, on, fn] of toggles) {
+for (const [key, on, fn] of toggles) {
   const l = document.createElement("label");
   l.className = "chip";
-  l.innerHTML = `<input type="checkbox" ${on ? "checked" : ""}> ${text}`;
-  const input = l.querySelector("input");
-  input.addEventListener("change", () => fn(input.checked));
+  const input = document.createElement("input");
+  input.type = "checkbox"; input.className = "sr-only"; input.checked = on;
+  const ind = document.createElement("span");
+  ind.className = "chip-ind"; ind.setAttribute("aria-hidden", "true"); ind.innerHTML = CHECK_SVG;
+  chipText[key] = document.createTextNode(t("layer." + key));
+  l.append(input, ind, chipText[key]);
+  const sync = () => l.classList.toggle("on", input.checked);
+  input.addEventListener("change", () => { sync(); fn(input.checked); requestRender(); });
   chipEls[key] = input;
   chips.appendChild(l);
+  sync();
   fn(on);
 }
 function setToggle(key, v) { if (chipEls[key].checked !== v) { chipEls[key].checked = v; chipEls[key].dispatchEvent(new Event("change")); } }
 
 const VIEWS = {
-  inside: { name: "İçeriden", pos: [-1.35, -0.3, 1.0], target: [3.2, 0, 1.3], floor: true },
-  below: { name: "Alttan", pos: [0.1, -3.4, -3.9], target: [3, 0, 1.1], floor: false },
-  side: { name: "Dışarıdan", pos: [3.9, -7.6, 1.7], target: [3, 0, 1.15], floor: true },
-  top: { name: "Üstten", pos: [3, -1.3, 8.2], target: [3, 0, 0.8], floor: true },
+  inside: { pos: [-1.35, -0.3, 1.0], target: [3.2, 0, 1.3], floor: true },   // button text: t("view." + key)
+  below: { pos: [0.1, -3.4, -3.9], target: [3, 0, 1.1], floor: false },
+  side: { pos: [3.9, -7.6, 1.7], target: [3, 0, 1.15], floor: true },
+  top: { pos: [3, -1.3, 8.2], target: [3, 0, 0.8], floor: true },
 };
-const viewsEl = document.getElementById("views");
-for (const [key, v] of Object.entries(VIEWS)) {
+const viewsEl = document.getElementById("views"), viewBtns = {};
+for (const key of Object.keys(VIEWS)) {
   const b = document.createElement("button");
-  b.type = "button"; b.textContent = v.name;
+  b.type = "button"; b.textContent = t("view." + key); b.setAttribute("role", "radio");
   b.addEventListener("click", () => flyTo(key));
   viewsEl.appendChild(b);
+  viewBtns[key] = b;
 }
-let tween = null, currentView = "inside";
+radioKeys(viewsEl);
+let tween = null, currentView = "side";
 function flyTo(key, instant = false) {
   const v = VIEWS[key];
   currentView = key;
+  setRadio(viewsEl, viewBtns[key]);
   setToggle("floor", v.floor);
   const p1 = new THREE.Vector3(...v.pos), t1 = new THREE.Vector3(...v.target);
-  if (instant || REDUCED) { camera.position.copy(p1); controls.target.copy(t1); tween = null; return; }
-  tween = { p0: camera.position.clone(), t0: controls.target.clone(), p1, t1, start: performance.now(), dur: 1100 };
+  if (instant || REDUCED) { camera.position.copy(p1); controls.target.copy(t1); tween = null; }
+  else tween = { p0: camera.position.clone(), t0: controls.target.clone(), p1, t1, start: performance.now(), dur: 1100 };
+  writeHash();
+  requestRender();
 }
 
-// ---------------------------------------------------------------- routing playback animation
+// ---------------------------------------------------------------- routing playback: play, scrub, speed
 const statusEl = document.getElementById("status");
-const playBtn = document.getElementById("play");
-let anim = null;
-const PER_CABLE = 0.75;   // seconds per cable
+const playBtn = document.getElementById("play"), scrub = document.getElementById("scrub"), speedEl = document.getElementById("speed");
+let anim = null, speed = 1;
+const PER_CABLE = 0.75;   // seconds per cable at 1x
 function setProgress(view, f) {   // f in [0, n]: cables drawn in routing order, the first floor(f) complete
   view.seq.forEach((ci, rank) => {
     const cb = view.cables[ci];
@@ -590,38 +722,156 @@ function setProgress(view, f) {   // f in [0, n]: cables drawn in routing order,
     cb.geo.setDrawRange(0, Math.floor(frac * cb.segs) * cb.radial * 6);
     cb.ends.visible = frac > 0;
   });
+  const n = view.cables.length, done = f >= n;
+  view.clampsG.visible = done && chipEls.clamps.checked;
+  view.violG.visible = done && chipEls.viol.checked;
+  scrub.value = String(f / n);
+  scrub.style.setProperty("--p", `${(Math.min(f / n, 1) * 100).toFixed(1)}%`);   // filled part of the track
+  const k = Math.min(Math.floor(f), n - 1), cb = view.cables[view.seq[k]];
+  statusEl.textContent = done ? "" : t("status.routing", { name: cb.c.name, cls: clsName(cb.c.cls), k: k + 1, n });
+  requestRender();
 }
 function play() {
-  const v = methods[active];
-  anim = { view: v, start: performance.now() };
-  v.clampsG.parent && (v.clampsG.visible = false);
-  v.violG.visible = false;
-  playBtn.textContent = "■ Durdur";
-  setProgress(v, 0);
+  const v = methods[active], n = v.cables.length;
+  const from = Number(scrub.value) * n;
+  anim = { view: v, start: performance.now(), from: from >= n ? 0 : from };
+  setPlaying(true);
+  setProgress(v, anim.from);
+}
+function stop() {   // pause where it is
+  anim = null;
+  setPlaying(false);
+}
+function setPlaying(on) {
+  playBtn.classList.toggle("playing", on);
+  playBtn.setAttribute("aria-label", t(on ? "play.pause" : "play.aria"));
+  playBtn.querySelector(".play-text").textContent = t(on ? "play.pause" : "play.play");
 }
 function finish() {
-  if (!anim) return;
-  const v = anim.view;
-  setProgress(v, v.cables.length);
-  v.clampsG.visible = chipEls.clamps.checked;
-  v.violG.visible = chipEls.viol.checked;
-  anim = null;
-  statusEl.textContent = "";
-  playBtn.textContent = "▶ Rotalamayı oynat";
+  if (anim) setProgress(anim.view, anim.view.cables.length);
+  stop();
 }
-playBtn.addEventListener("click", () => (anim ? finish() : play()));
+playBtn.addEventListener("click", () => (anim ? stop() : play()));
+scrub.addEventListener("input", () => { stop(); const v = methods[active]; setProgress(v, Number(scrub.value) * v.cables.length); });
+for (const b of speedEl.querySelectorAll("button")) {
+  b.addEventListener("click", () => {
+    speed = Number(b.dataset.speed);
+    setRadio(speedEl, b);
+    if (!anim) return;   // keep the current position when the speed changes mid-playback
+    const v = methods[active];
+    anim = { view: v, start: performance.now(), from: Number(scrub.value) * v.cables.length };
+  });
+}
+const speedTexts = () => speedEl.querySelectorAll("button").forEach(b => {
+  b.textContent = fmt(Number(b.dataset.speed), b.dataset.speed.includes(".") ? 1 : 0) + "×";   // 0,5× / 0.5×
+});
+speedTexts();
+setRadio(speedEl, speedEl.querySelector('[data-speed="1"]'));
+radioKeys(speedEl);
 
-function select(key, autoplay) {
+// ---------------------------------------------------------------- fullscreen 3D view
+// Element fullscreen where the browser has it; otherwise (e.g. iPhone Safari) the view fills the window.
+const fsBtn = document.getElementById("fullscreen");
+const inFullscreen = () => document.fullscreenElement === host || host.classList.contains("pseudo-fs");
+function syncFullscreen() {
+  const on = inFullscreen();
+  fsBtn.classList.toggle("on", on);
+  fsBtn.setAttribute("aria-label", t(on ? "fs.exit" : "fs.enter"));
+  fsBtn.title = t(on ? "fs.exitTitle" : "fs.enterTitle");
+  document.body.classList.toggle("fs-lock", host.classList.contains("pseudo-fs"));
+}
+async function toggleFullscreen() {
+  if (!inFullscreen()) tourEnd();   // the tour card lives outside the 3D view and would be hidden behind it
+  if (document.fullscreenElement) await document.exitFullscreen();
+  else if (host.classList.contains("pseudo-fs")) host.classList.remove("pseudo-fs");
+  else if (host.requestFullscreen && document.fullscreenEnabled) {
+    try { await host.requestFullscreen({ navigationUI: "hide" }); } catch (e) { host.classList.add("pseudo-fs"); }
+  } else host.classList.add("pseudo-fs");
+  syncFullscreen();
+}
+fsBtn.addEventListener("click", toggleFullscreen);
+document.addEventListener("fullscreenchange", syncFullscreen);
+addEventListener("keydown", e => {
+  const typing = e.target.closest && e.target.closest("input, select, textarea");
+  if ((e.key === "f" || e.key === "F") && !e.ctrlKey && !e.metaKey && !e.altKey && !typing) toggleFullscreen();
+  // Escape closes the tour first (its own handler); only a later Escape leaves the window-filling view
+  else if (e.key === "Escape" && host.classList.contains("pseudo-fs") && tourStep < 0) toggleFullscreen();
+});
+
+// ---------------------------------------------------------------- method selection, cable table, comparison
+const cableBody = document.querySelector("#cabletable tbody");
+const cmpBody = document.querySelector("#compare tbody");
+function select(key) {   // the playback never starts by itself: the Play button starts it
   finish();
   clearSelection();
+  setHover(null);   // the hovered cable belongs to the method being hidden
   const idx = methods.findIndex(v => v.m.key === key);
   methods.forEach((v, i) => { v.group.visible = i === idx; });
   active = idx;
-  tabsEl.querySelectorAll("button").forEach(b => b.setAttribute("aria-selected", String(b.dataset.key === key)));
-  renderStats(methods[idx].m);
+  [...tabsEl.children].forEach(b => {
+    const on = b.dataset.key === key;
+    b.setAttribute("aria-selected", String(on));
+    b.tabIndex = on ? 0 : -1;
+  });
+  panelEl.setAttribute("aria-labelledby", "tab-" + key);
+  const m = methods[idx].m;
+  renderSummary(m);
+  renderStats(m);
+  renderCableTable(methods[idx]);
+  [...cmpBody.children].forEach(tr => tr.setAttribute("aria-selected", String(tr.dataset.key === key)));
   setProgress(methods[idx], methods[idx].cables.length);
-  if (autoplay && !REDUCED) play();
+  updateHover();   // a resting pointer now points at this method's cables (or at none)
+  writeHash();
 }
+
+const cm = v => (v === null || v === undefined ? "—" : `${v >= 0 ? "+" : ""}${fmt(v * 100, 1)} cm`);
+function renderCableTable(view) {
+  cableBody.replaceChildren(...view.cables.map(cb => {
+    const mg = cb.margin || {}, c = cb.c;
+    const tr = document.createElement("tr");
+    tr.tabIndex = 0;
+    tr.dataset.cable = c.name;
+    tr.setAttribute("aria-selected", String(selected === cb));
+    const okEmc = mg.emc == null || mg.emc >= 0, okBend = mg.bend == null || mg.bend >= D.minBendRadius;
+    const okKo = mg.keepout == null || mg.keepout >= D.clearance;
+    tr.innerHTML =
+      `<th scope="row">${esc(c.name)}</th>` +
+      `<td><span class="sw-cls" style="background:${esc(D.classColors[c.cls])}"></span>${esc(clsName(c.cls))}</td>` +
+      `<td>${esc(placeName(c.from))} → ${esc(placeName(c.to))}</td>` +
+      `<td class="num">${fmt(cb.length, 2)}</td>` +
+      `<td class="num ${okEmc ? "ok" : "ng"}">${mark(okEmc)} ${esc(cm(mg.emc))}</td>` +
+      `<td class="num ${okBend ? "ok" : "ng"}">${mark(okBend)} ${mg.bend == null ? "—" : fmt(mg.bend, 3)}</td>` +
+      `<td class="num ${okKo ? "ok" : "ng"}">${mark(okKo)} ${mg.keepout == null ? "—" : fmt(mg.keepout * 100, 1) + " cm"}</td>` +
+      `<td class="num">${mg.parallel == null ? "—" : fmt(mg.parallel, 2)}</td>` +
+      `<td class="${mg.status === "OK" ? "ok" : "ng"}">${mark(mg.status === "OK")} ${esc(mg.status ?? "—")}</td>`;
+    const pick = () => (selected === cb ? clearSelection() : selectCable(cb));
+    tr.addEventListener("click", pick);
+    tr.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } });
+    return tr;
+  }));
+}
+
+const maxLen = Math.max(...methods.map(v => v.m.total_length_m));
+function renderCompare() {
+  cmpBody.replaceChildren(...methods.map(v => {
+    const m = v.m, bad = failedChecks(m);
+    const tr = document.createElement("tr");
+    tr.tabIndex = 0;
+    tr.dataset.key = m.key;
+    tr.setAttribute("aria-selected", String(active !== null && methods[active].m.key === m.key));
+    tr.innerHTML =
+      `<th scope="row">${esc(methodLabel(m))}</th>` +
+      `<td><div class="bar"><span class="fill" style="width:${(m.total_length_m / maxLen * 140).toFixed(0)}px"></span>` +
+      `${fmt(m.total_length_m, 2)} m</div></td>` +
+      `<td class="num">${fmt(m.bundling_ratio, 3)}</td>` +
+      `<td class="${bad.length ? "ng" : "ok"}">${bad.length ? "✗ " + checkList(m) : "✓ " + esc(t("compare.allClean"))}</td>`;
+    const go = () => { select(m.key); document.getElementById("tab-" + m.key).scrollIntoView({ block: "nearest" }); };
+    tr.addEventListener("click", go);
+    tr.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+    return tr;
+  }));
+}
+renderCompare();
 
 // ---------------------------------------------------------------- hover tooltip and click-to-select
 const tip = document.getElementById("tip"), selinfo = document.getElementById("selinfo");
@@ -638,8 +888,8 @@ renderer.domElement.addEventListener("pointerleave", () => { pointerPx = null; u
 renderer.domElement.addEventListener("pointerdown", e => { downAt = [e.clientX, e.clientY]; });
 renderer.domElement.addEventListener("pointerup", e => {
   if (!downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 5) return;
-  const hit = pick();
-  if (hit) selectCable(hit); else clearSelection();
+  const hit = pick();   // a click on the selected cable deselects it, as in the cable table
+  if (hit && hit !== selected) selectCable(hit); else clearSelection();
 });
 function pick() {
   if (active === null || !pointerPx) return null;
@@ -653,27 +903,26 @@ function updateHover() {
   if (!cb) { tip.style.display = "none"; return; }
   tip.style.display = "block";
   tip.style.left = pointerPx[0] + "px"; tip.style.top = pointerPx[1] + "px";
-  tip.innerHTML = `<b>${cb.c.name}</b> · ${cb.c.cls} (${CLASS_TR[cb.c.cls] || cb.c.cls}) · ${cb.length.toFixed(2)} m` +
+  tip.innerHTML = `<b>${esc(cb.c.name)}</b> · ${esc(clsName(cb.c.cls))} · ${fmt(cb.length, 2)} m` +
     (cb.margin ? `<br>${marginHtml(cb.margin)}` : "");
 }
 // Per-cable verification margins (independent checks): EMC separation, bend radius, keep-out distance.
 function marginHtml(mg) {
   const cls = ok => (ok ? "ok" : "ng");
-  const cm = v => (v === null ? "—" : `${v >= 0 ? "+" : ""}${(v * 100).toFixed(1)} cm`);
   const parts = [
-    `EMC payı <span class="${cls(mg.emc === null || mg.emc >= 0)}">${cm(mg.emc)}</span>`,
-    `min. bükülme R <span class="${cls(mg.bend === null || mg.bend >= D.minBendRadius)}">` +
-      `${mg.bend === null ? "—" : mg.bend.toFixed(3) + " m"}</span>`,
-    `yasak hacme <span class="${cls(mg.keepout === null || mg.keepout >= D.clearance)}">` +
-      `${mg.keepout === null ? "—" : (mg.keepout * 100).toFixed(1) + " cm"}</span>`,
-  ];
-  return parts.join(" · ") + ` · <span class="${cls(mg.status === "OK")}">${mg.status}</span>`;
+    [t("margin.emc"), mg.emc === null || mg.emc >= 0, cm(mg.emc)],
+    [t("margin.bend"), mg.bend === null || mg.bend >= D.minBendRadius, mg.bend === null ? "—" : fmt(mg.bend, 3) + " m"],
+    [t("margin.keepout"), mg.keepout === null || mg.keepout >= D.clearance,
+     mg.keepout === null ? "—" : fmt(mg.keepout * 100, 1) + " cm"],
+  ].map(([k, ok, v]) => `${esc(k)} <span class="${cls(ok)}">${mark(ok)} ${esc(v)}</span>`);
+  return parts.join(" · ") + ` · <span class="${cls(mg.status === "OK")}">${mark(mg.status === "OK")} ${esc(mg.status)}</span>`;
 }
 function setHover(cb) {
   if (hovered === cb) return;
   if (hovered && hovered !== selected) hovered.mesh.material.emissive.setHex(0x000000);
   hovered = cb;
   if (cb) cb.mesh.material.emissive.setHex(0x333333);
+  requestRender();
 }
 function selectCable(cb) {
   clearSelection();
@@ -687,19 +936,158 @@ function selectCable(cb) {
                                     side: THREE.DoubleSide }));
     scene.add(envelope);
   }
-  const seps = others.map(k => `${k}: ${sep(cb.c.cls, k).toFixed(2)} m`).join(", ");
-  selinfo.innerHTML = `<b>Seçili: ${cb.c.name}</b> (${cb.c.cls}, ${cb.c.from} → ${cb.c.to}) — güzergâh uzunluğu ` +
-    `${cb.length.toFixed(2)} m. ` + (cb.margin ? `Doğrulama payları: ${marginHtml(cb.margin)}. ` : "") +
-    `Gösterilen zarf, diğer sınıflara gereken en büyük ayrım mesafesidir (${seps}).`;
+  renderSelinfo(cb);
+  for (const tr of cableBody.children) tr.setAttribute("aria-selected", String(tr.dataset.cable === cb.c.name));
+  writeHash();
+  requestRender();
+}
+function renderSelinfo(cb) {
+  const others = [...new Set(D.cables.map(c => c.cls))].filter(k => k !== cb.c.cls);
+  const seps = others.map(k => `${clsName(k)}: ${fmt(sep(cb.c.cls, k), 2)} m`).join(", ");
+  selinfo.innerHTML = `<b>${esc(t("sel.title", { name: cb.c.name }))}</b> ` +
+    `(${esc(clsName(cb.c.cls))}, ${esc(placeName(cb.c.from))} → ${esc(placeName(cb.c.to))}) — ` +
+    `${esc(t("sel.length", { len: fmt(cb.length, 2) }))} ` +
+    (cb.margin ? t("sel.margins", { margins: marginHtml(cb.margin) }) + " " : "") +   // marginHtml escapes its parts
+    esc(t("sel.envelope", { seps }));
 }
 function clearSelection() {
-  if (selected) selected.mesh.material.emissive.setHex(0x000000);
+  // a cable that is still under the pointer keeps its hover highlight
+  if (selected) selected.mesh.material.emissive.setHex(selected === hovered ? 0x333333 : 0x000000);
   selected = null;
   if (envelope) { scene.remove(envelope); envelope.geometry.dispose(); envelope.material.dispose(); envelope = null; }
   selinfo.textContent = "";
+  for (const tr of cableBody.children) tr.setAttribute("aria-selected", "false");
+  writeHash();
+  requestRender();
 }
 
-// ---------------------------------------------------------------- resize and render loop
+// ---------------------------------------------------------------- shareable state in the URL (#m=…&v=…&c=…)
+const VALID = { m: new Set(methods.map(v => v.m.key)), v: new Set(Object.keys(VIEWS)), c: new Set(D.cables.map(c => c.name)) };
+function readHash() {
+  const p = new URLSearchParams(location.hash.slice(1)), out = {};
+  for (const k of ["m", "v", "c"]) out[k] = VALID[k].has(p.get(k)) ? p.get(k) : null;   // only known values
+  return out;
+}
+let hashReady = false;   // no writes while the initial state is restored
+function writeHash() {
+  if (CAPTURE || !hashReady || active === null) return;
+  const p = new URLSearchParams({ m: methods[active].m.key, v: currentView });
+  if (selected) p.set("c", selected.c.name);
+  try { history.replaceState(null, "", "#" + p.toString()); } catch (e) { /* e.g. sandboxed frame */ }
+}
+function applyHash() {
+  const h = readHash();
+  if (h.m && h.m !== methods[active]?.m.key) select(h.m);
+  if (h.v && h.v !== currentView) flyTo(h.v, true);
+  const cb = h.c && methods[active].cables.find(x => x.c.name === h.c);
+  if (cb && cb !== selected) selectCable(cb);
+  else if (!cb && selected) clearSelection();   // no (known) cable in the address: nothing selected
+}
+addEventListener("hashchange", applyHash);
+
+// ---------------------------------------------------------------- language change: redraw every rendered text
+function refreshTexts() {
+  syncLang();
+  [...tabsEl.children].forEach((b, i) => { b.textContent = methodLabel(methods[i].m); });
+  renderLegend();
+  for (const [key] of toggles) chipText[key].textContent = t("layer." + key);
+  for (const [key, b] of Object.entries(viewBtns)) b.textContent = t("view." + key);
+  speedTexts();
+  for (const g of [viewsEl, speedEl]) placeThumb(g, true);   // button widths changed with the text
+  setPlaying(Boolean(anim));
+  syncFullscreen();
+  for (const { el, name } of koLabels) el.textContent = t("keepout.label", { name: placeName(name) });
+  for (const { el, name } of eqLabels) el.textContent = placeName(name);
+  const view = methods[active];
+  renderSummary(view.m);
+  renderStats(view.m);
+  renderCableTable(view);
+  renderCompare();
+  if (selected) renderSelinfo(selected);
+  if (!anim) setProgress(view, Number(scrub.value) * view.cables.length);   // status line
+  if (tourStep >= 0) tourShow(tourStep, false);
+  requestRender();
+}
+I18N.onChange(refreshTexts);
+
+// ---------------------------------------------------------------- guided tour (first visit; the ? button restarts it)
+const TOUR = [["methods", "tabs"], ["view", "viewer"], ["play", "playbar"], ["toolbar", "toolbar"], ["table", "cabletable"]];
+const tourPop = document.getElementById("tour-pop"), tourRing = document.getElementById("tour-ring");
+const tourNext = document.getElementById("tour-next"), tourBack = document.getElementById("tour-back");
+const tourBtn = document.getElementById("tour-btn");
+let tourStep = -1;
+function tourShow(i, scroll = true) {
+  tourStep = i;
+  const [key, id] = TOUR[i];
+  document.getElementById("tour-title").textContent = t(`tour.${key}.title`);
+  document.getElementById("tour-body").textContent = t(`tour.${key}.body`);
+  document.getElementById("tour-count").textContent = t("tour.count", { i: i + 1, n: TOUR.length });
+  document.getElementById("tour-dots").replaceChildren(...TOUR.map((_, k) => {
+    const d = document.createElement("span");
+    if (k === i) d.className = "on";
+    return d;
+  }));
+  tourBack.hidden = i === 0;
+  tourNext.textContent = t(i === TOUR.length - 1 ? "tour.done" : "tour.next");
+  const opening = tourPop.hidden;   // appear in place; only moves between steps are animated
+  for (const el of [tourPop, tourRing]) el.style.transition = opening ? "none" : "";
+  tourPop.hidden = tourRing.hidden = false;
+  if (scroll) {
+    document.getElementById(id).scrollIntoView({ block: "center", behavior: REDUCED ? "auto" : "smooth" });
+    tourNext.focus({ preventScroll: true });
+  }
+  placeTour();
+  if (opening) requestAnimationFrame(() => { for (const el of [tourPop, tourRing]) el.style.transition = ""; });
+}
+function placeTour() {   // ring around the target; card below it, else above it, else inside its top edge
+  if (tourStep < 0) return;
+  const r = document.getElementById(TOUR[tourStep][1]).getBoundingClientRect();
+  const vw = document.documentElement.clientWidth, vh = innerHeight, pad = 6, gap = 12, edge = 16;
+  const top = Math.max(r.top - pad, 4), bottom = Math.min(r.bottom + pad, vh - 4);
+  Object.assign(tourRing.style, { left: `${r.left - pad}px`, top: `${top}px`, width: `${r.width + 2 * pad}px`,
+                                  height: `${Math.max(bottom - top, 0)}px` });
+  const pw = tourPop.offsetWidth, ph = tourPop.offsetHeight;
+  let y = r.bottom + gap;
+  if (y + ph > vh - edge) y = r.top - gap - ph;
+  if (y < edge) y = Math.min(vh - edge - ph, Math.max(edge, r.top + edge));
+  tourPop.style.left = `${Math.min(Math.max(edge, r.left), vw - edge - pw)}px`;
+  tourPop.style.top = `${y}px`;
+}
+function tourEnd() {
+  if (tourStep < 0) return;
+  tourStep = -1;
+  tourPop.hidden = tourRing.hidden = true;
+  try { localStorage.setItem("emc-kablo:tour", "done"); } catch (e) { /* shown again next visit */ }
+}
+tourNext.addEventListener("click", () => (tourStep < TOUR.length - 1 ? tourShow(tourStep + 1) : tourEnd()));
+tourBack.addEventListener("click", () => tourShow(Math.max(0, tourStep - 1)));
+document.getElementById("tour-close").addEventListener("click", tourEnd);
+tourBtn.addEventListener("click", () => tourShow(0));
+addEventListener("keydown", e => { if (e.key === "Escape" && tourStep >= 0) { tourEnd(); tourBtn.focus(); } });
+let tourFrame = 0;   // follow scrolling and resizing at most once per frame
+const followTour = () => { if (tourStep >= 0 && !tourFrame) tourFrame = requestAnimationFrame(() => { tourFrame = 0; placeTour(); }); };
+addEventListener("scroll", followTour, { passive: true });
+addEventListener("resize", followTour);
+
+// ---------------------------------------------------------------- label decluttering
+const hudEls = ["legend", "playbar", "status", "caption", "fullscreen"].map(id => document.getElementById(id));
+function declutter() {   // hide labels that overlap a higher-priority label or the HUD, or leave the view
+  if (!labels.visible) return;
+  const box = host.getBoundingClientRect();
+  const placed = hudEls.filter(el => el.offsetParent !== null && el.offsetWidth).map(el => el.getBoundingClientRect());
+  for (const { el } of labelEls) {
+    el.classList.remove("culled");
+    if (el.style.display === "none" || !el.isConnected) continue;
+    const r = el.getBoundingClientRect();
+    if (!r.width) continue;
+    const outside = r.left < box.left + 2 || r.right > box.right - 2 || r.top < box.top + 2 || r.bottom > box.bottom - 2;
+    const overlap = placed.some(p => r.left < p.right + 3 && r.right > p.left - 3 && r.top < p.bottom + 2 && r.bottom > p.top - 2);
+    if (outside || overlap) el.classList.add("culled");
+    else placed.push(r);
+  }
+}
+
+// ---------------------------------------------------------------- resize and on-demand rendering
 function resize() {
   const w = host.clientWidth, h = host.clientHeight;
   renderer.setSize(w, h, false);
@@ -709,78 +1097,95 @@ function resize() {
   const vfov = 2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(72) / 2) / camera.aspect);
   camera.fov = THREE.MathUtils.clamp(THREE.MathUtils.radToDeg(vfov), 42, 80);
   camera.updateProjectionMatrix();
+  requestRender();
 }
-new ResizeObserver(resize).observe(host);
-resize();
 
+// A frame is drawn only when something changed (camera, playback, hover, toggles), not 60 times a second.
+let frameQueued = false;
+function requestRender() {
+  if (frameQueued) return;
+  frameQueued = true;
+  requestAnimationFrame(loop);
+}
+controls.addEventListener("change", requestRender);
 const ease = t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 function loop(now) {
+  frameQueued = false;
+  let again = controls.autoRotate;
   if (tween) {
     const k = Math.min(1, (now - tween.start) / tween.dur), e = ease(k);
     camera.position.lerpVectors(tween.p0, tween.p1, e);
     controls.target.lerpVectors(tween.t0, tween.t1, e);
     if (k >= 1) tween = null;
+    again = true;
   }
   if (anim) {
     // rAF timestamps can precede the performance.now() taken in play(): never go below 0.
-    const f = Math.max(0, (now - anim.start) / 1000 / PER_CABLE), n = anim.view.cables.length;
+    const n = anim.view.cables.length;
+    const f = anim.from + Math.max(0, (now - anim.start) / 1000 / PER_CABLE * speed);
     if (f >= n) finish();
     else {
       setProgress(anim.view, f);
-      const cb = anim.view.cables[anim.view.seq[Math.floor(f)]];
-      statusEl.textContent = `Rotalanıyor: ${cb.c.name} (${cb.c.cls}) — ${Math.floor(f) + 1}/${n}`;
+      if (actuatorArm && !REDUCED) actuatorArm.rotation.x = 0.55 * Math.sin(now / 1000 * 0.9);
+      again = true;
     }
   }
-  if (actuatorArm && !REDUCED && !CAPTURE) actuatorArm.rotation.x = 0.55 * Math.sin(now / 1000 * 0.9);
   if (controls.update() && pointerPx) updateHover();   // the camera moved under a resting pointer
   renderer.render(scene, camera);
   labelRenderer.render(scene, camera);
-  requestAnimationFrame(loop);
+  declutter();
+  if (again) requestRender();
 }
+new ResizeObserver(resize).observe(host);
+resize();
 
 // ---------------------------------------------------------------- scripting interface (README image capture)
 function captionHtml(m) {
   const cls = v => (v ? "ng" : "ok");
-  const fmt = (x, d) => x.toLocaleString("tr-TR", { minimumFractionDigits: d, maximumFractionDigits: d });
-  return `<b>${m.label}</b><br>EMC <span class="${cls(m.emc_points)}">${fmt(m.emc_points, 0)} nokta</span> · ` +
-    `kapasite <span class="${cls(m.capacity_edges)}">${m.capacity_edges} ayrıt</span> · ` +
-    `bükülme <span class="${cls(m.bend_points)}">${m.bend_points}</span> · demetlenme ${fmt(m.bundling_ratio, 3)}`;
+  return `<b>${esc(methodLabel(m))}</b><br>EMC <span class="${cls(m.emc_points)}">${mark(!m.emc_points)} ` +
+    `${fmt(m.emc_points, 0)} ${esc(t("unit.points"))}</span> · ${esc(t("caption.capacity"))} <span class="${cls(m.capacity_edges)}">` +
+    `${mark(!m.capacity_edges)} ${m.capacity_edges} ${esc(t("unit.edges"))}</span> · ${esc(t("caption.bend"))} ` +
+    `<span class="${cls(m.bend_points)}">${mark(!m.bend_points)} ${m.bend_points}</span> · ` +
+    `${esc(t("caption.bundling"))} ${fmt(m.bundling_ratio, 3)}`;
 }
+const nextFrame = () => new Promise(r => { requestRender(); requestAnimationFrame(() => requestAnimationFrame(r)); });
 window.viewer = {
   methods: methods.map(v => v.m.key),
   cableCount: D.cables.length,
-  select(key) { select(key, false); document.getElementById("caption").innerHTML = captionHtml(methods[active].m); },
+  select(key) { select(key); document.getElementById("caption").innerHTML = captionHtml(methods[active].m); },
   view(key) { flyTo(key, true); },
   orbit(deg) {   // rotate the current preset camera about the vertical axis through its target
     const v = VIEWS[currentView], t = new THREE.Vector3(...v.target);
     const off = new THREE.Vector3(...v.pos).sub(t).applyAxisAngle(new THREE.Vector3(0, 0, 1), THREE.MathUtils.degToRad(deg));
-    camera.position.copy(t).add(off); controls.target.copy(t); controls.update();
+    camera.position.copy(t).add(off); controls.target.copy(t); controls.update(); requestRender();
   },
-  progress(f) {   // f in [0, n]: cables drawn so far in routing order; clamps/violations only when complete
-    const v = methods[active], n = v.cables.length;
-    setProgress(v, f);
-    v.clampsG.visible = f >= n && chipEls.clamps.checked;
-    v.violG.visible = f >= n && chipEls.viol.checked;
-    const k = Math.min(Math.floor(f), n - 1), cb = v.cables[v.seq[k]];
-    statusEl.textContent = f >= n ? "" : `Rotalanıyor: ${cb.c.name} (${cb.c.cls}) — ${k + 1}/${n}`;
-  },
+  progress(f) { stop(); setProgress(methods[active], f); },   // f in [0, n]: cables drawn so far in routing order
   camera(pos, target, fov) {   // explicit camera for captures; fov keeps the horizontal field of view otherwise
     camera.position.set(...pos); controls.target.set(...target);
     if (fov) { camera.fov = fov; camera.updateProjectionMatrix(); }
-    controls.update();
+    controls.update(); requestRender();
   },
   labels(mode) {   // "all" | "context" (volumes and equipment only) | "none"
     labels.visible = mode !== "none";
     cableLabels.visible = mode === "all";
+    requestRender();
   },
   toggle: setToggle,
-  actuator(angle) { if (actuatorArm) actuatorArm.rotation.x = angle; },
-  frame: () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))),
+  lang(code) { I18N.set(code); },   // "tr" | "en"
+  actuator(angle) { if (actuatorArm) { actuatorArm.rotation.x = angle; requestRender(); } },
+  frame: nextFrame,
 };
 
-flyTo("inside", true);
-select(D.initial, !CAPTURE);
+const initial = CAPTURE ? {} : readHash();
+flyTo(initial.v || "side", true);   // opens outside: the whole fuselage and every cable in one view
+if (actuatorArm) actuatorArm.rotation.x = 0.35;
+select(initial.m || D.initial);   // all cables drawn; no autoplay
 if (CAPTURE) window.viewer.select(D.initial);
+hashReady = true;
+applyHash();
 document.getElementById("loading").remove();
 window.__viewerReady = true;
-requestAnimationFrame(loop);
+
+let tourSeen = true;   // without storage the tour is not forced on every visit
+try { tourSeen = localStorage.getItem("emc-kablo:tour") === "done"; } catch (e) { /* storage blocked */ }
+if (!CAPTURE && !tourSeen) setTimeout(() => { if (tourStep < 0) tourShow(0); }, 1200);

@@ -7,7 +7,6 @@ import json
 
 import pytest
 
-import main
 from harness_demo.checks import CheckSettings
 from harness_demo.export import (
     WIRELIST_COLUMNS,
@@ -15,12 +14,15 @@ from harness_demo.export import (
     export_wirelist_csv,
     generate_wirelist_records,
 )
-from harness_demo.scenarios import separation
+from harness_demo.scenarios import load_scenario
+
+SC = load_scenario()  # the example scenario of the published run
+separation = SC.separation
 
 
 @pytest.fixture(scope="module")
 def settings(volumes):
-    return CheckSettings(volumes, separation, main.MIN_BEND_RADIUS_M, main.CAPACITY_K, main.CLEARANCE_M)
+    return CheckSettings(volumes, separation, SC.min_bend_radius, SC.capacity_k, SC.clearance)
 
 
 def test_wirelist_records(graph, cables, results, settings):
@@ -39,8 +41,8 @@ def test_wirelist_margins_agree_with_independent_checks(graph, cables, results, 
     """A cable is flagged exactly when the independent checks find a violation on the route set."""
     clean = generate_wirelist_records(graph, cables, results["integrated"].routes, settings)
     assert all(r["status"] == "OK" for r in clean)
-    assert all(r["min_emc_margin_m"] >= 0 and r["min_bend_radius_m"] >= main.MIN_BEND_RADIUS_M
-               and r["min_keepout_distance_m"] >= main.CLEARANCE_M for r in clean)
+    assert all(r["min_emc_margin_m"] >= 0 and r["min_bend_radius_m"] >= SC.min_bend_radius
+               and r["min_keepout_distance_m"] >= SC.clearance for r in clean)
 
     bundled = generate_wirelist_records(graph, cables, results["bundled"].routes, settings)
     assert metrics["bundled"]["emc_points"] > 0

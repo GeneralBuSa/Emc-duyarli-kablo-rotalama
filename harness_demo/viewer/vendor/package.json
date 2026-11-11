@@ -1,0 +1,15 @@
+{
+  "name": "viewer-three-bundle",
+  "private": true,
+  "description": "Builds three.bundle.min.js: three.js and the three addons the viewer uses, as one classic script that sets window.__three; and copies the Inter variable font (Latin + Latin Extended, OFL) to fonts/. The page embeds both, so it needs no CDN and works offline. Rebuild: npm ci --ignore-scripts && npm run build && npm run fonts",
+  "license": "MIT",
+  "scripts": {
+    "build": "esbuild entry.js --bundle --minify --format=iife --target=es2020 --legal-comments=inline --outfile=three.bundle.min.js",
+    "fonts": "node -e \"const fs=require('fs'),d='node_modules/@fontsource-variable/inter/';fs.mkdirSync('fonts',{recursive:true});for(const f of ['inter-latin-wght-normal.woff2','inter-latin-ext-wght-normal.woff2'])fs.copyFileSync(d+'files/'+f,'fonts/'+f);fs.copyFileSync(d+'LICENSE','fonts/LICENSE')\""
+  },
+  "devDependencies": {
+    "@fontsource-variable/inter": "5.3.0",
+    "esbuild": "0.25.0",
+    "three": "0.169.0"
+  }
+}

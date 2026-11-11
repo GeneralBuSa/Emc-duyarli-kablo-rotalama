@@ -18,7 +18,10 @@ from harness_demo.checks import (
     resample_polyline,
 )
 from harness_demo.geometry import BoxVolume, SphereVolume
-from harness_demo.scenarios import separation
+from harness_demo.scenarios import load_scenario
+
+SC = load_scenario()  # the example scenario of the published run
+separation = SC.separation
 
 
 def line(y: float, length: float = 1.0) -> np.ndarray:
